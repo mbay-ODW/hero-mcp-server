@@ -1,6 +1,8 @@
 services:
   hero-mcp-server:
-    image: ghcr.io/your-github-user/hero-mcp-server:latest
+    build:
+      context: https://github.com/your-github-user/hero-mcp-server.git
+      dockerfile: Dockerfile
     container_name: hero-mcp-server
     restart: unless-stopped
     environment:
