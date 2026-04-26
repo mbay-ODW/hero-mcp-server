@@ -9,7 +9,7 @@
         "hero-mcp-server"
       ],
       "env": {
-        "HERO_API_KEY": "DEIN_HERO_API_KEY"
+        "HERO_API_KEY": "DEINEN_API_KEY_HIER_EINTRAGEN"
       }
     }
   }

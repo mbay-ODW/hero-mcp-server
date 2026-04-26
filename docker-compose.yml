@@ -1,11 +1,10 @@
 services:
   hero-mcp-server:
-    build: .
-    image: hero-mcp-server:latest
+    image: ghcr.io/your-github-user/hero-mcp-server:latest
     container_name: hero-mcp-server
     restart: unless-stopped
     environment:
-      - HERO_API_KEY=${HERO_API_KEY:-DEIN_HERO_API_KEY}
+      - HERO_API_KEY=${HERO_API_KEY}
     stdin_open: true
     tty: true
     labels:

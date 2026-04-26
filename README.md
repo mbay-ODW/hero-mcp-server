@@ -84,58 +84,47 @@ Der HERO-Server erscheint nun in Claude unter den verfügbaren Tools.
 
 ## Docker-Deployment (Portainer)
 
-### Voraussetzungen
+Das Image wird bei jedem Push auf `main` automatisch über GitHub Actions gebaut und in der **GitHub Container Registry (ghcr.io)** veröffentlicht. Portainer kann es direkt von dort ziehen – kein manueller Build nötig.
 
-- Docker & Docker Compose
-- [Portainer](https://www.portainer.io/) (optional, aber empfohlen)
+### Image-URL
 
-### Image bauen
-
-```bash
-docker build -t hero-mcp-server:latest .
+```
+ghcr.io/your-github-user/hero-mcp-server:latest
 ```
 
-### Mit Docker Compose starten
-
-```bash
-# API-Key als Umgebungsvariable setzen
-export HERO_API_KEY=dein_api_key_hier
-
-docker compose up -d
-```
-
-Oder direkt in der `docker-compose.yml` eintragen:
-
-```yaml
-environment:
-  - HERO_API_KEY=dein_api_key_hier
-```
-
-### Deployment über Portainer
+### Deployment über Portainer (empfohlen)
 
 1. In Portainer einloggen
 2. **Stacks → Add Stack** öffnen
-3. Stack-Name vergeben, z.B. `hero-mcp-server`
-4. `docker-compose.yml` hochladen oder Inhalt einfügen
-5. Unter **Environment variables** den Key `HERO_API_KEY` mit deinem API-Key eintragen
-6. **Deploy the stack** klicken
-
-> **Hinweis:** Der MCP-Server kommuniziert über stdio – im Docker-Container wird er als Dienst betrieben, der von einem MCP-fähigen Host (z.B. einem weiteren Container oder einem Reverse-Proxy mit MCP-Unterstützung) angesprochen wird.
-
-### docker-compose.yml Übersicht
+3. Stack-Name vergeben: `hero-mcp-server`
+4. Folgenden Inhalt einfügen:
 
 ```yaml
 services:
   hero-mcp-server:
-    build: .
-    image: hero-mcp-server:latest
+    image: ghcr.io/your-github-user/hero-mcp-server:latest
     container_name: hero-mcp-server
     restart: unless-stopped
     environment:
-      - HERO_API_KEY=${HERO_API_KEY}
+      - HERO_API_KEY=dein_api_key_hier
     stdin_open: true
     tty: true
 ```
+
+5. **Deploy the stack** klicken
+
+> Das Image ist öffentlich über ghcr.io verfügbar – keine Authentifizierung beim Pull nötig.
+
+### Mit Docker Compose starten (lokal)
+
+```bash
+export HERO_API_KEY=dein_api_key_hier
+docker compose up -d
+```
+
+### Automatische Updates
+
+Jeder Push auf `main` triggert den GitHub Actions Workflow (`.github/workflows/docker.yml`) und aktualisiert das Image auf `ghcr.io` automatisch. In Portainer kann man **"Re-pull image and redeploy"** nutzen, um das neueste Image zu holen.
 
 ---
 
