@@ -1,0 +1,374 @@
+"""HERO MCP Server – MCP-Tools für die HERO Handwerkersoftware."""
+
+import json
+from typing import Any
+
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server import Server
+
+from .client import create_project_lead, graphql_query
+
+server = Server("hero-mcp-server")
+
+
+# ---------------------------------------------------------------------------
+# Tool-Definitionen
+# ---------------------------------------------------------------------------
+
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="hero_create_project",
+            description=(
+                "Legt ein neues Projekt (Lead) in HERO an. "
+                "Pflichtfeld: measure (Gewerk-Kürzel, z.B. 'PRJ') und customer.email."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "measure": {
+                        "type": "string",
+                        "description": "Gewerk-Kürzel, z.B. 'PRJ', 'HZG', 'SAN'",
+                    },
+                    "customer_email": {"type": "string", "description": "E-Mail des Kunden"},
+                    "customer_title": {"type": "string", "description": "Anrede (Herr/Frau)"},
+                    "customer_first_name": {"type": "string"},
+                    "customer_last_name": {"type": "string"},
+                    "customer_company": {"type": "string", "description": "Firmenname"},
+                    "street": {"type": "string"},
+                    "city": {"type": "string"},
+                    "zipcode": {"type": "string"},
+                    "country_code": {"type": "string", "default": "DE"},
+                    "comment": {"type": "string", "description": "Eintrag ins Projektprotokoll"},
+                    "partner_notes": {"type": "string", "description": "Notiz-Feld"},
+                    "partner_source": {"type": "string", "description": "Lead-Quelle"},
+                },
+                "required": ["measure", "customer_email"],
+            },
+        ),
+        types.Tool(
+            name="hero_get_contacts",
+            description="Listet Kontakte/Kunden aus HERO. Optional: Suchbegriff und Seitenanzahl.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {"type": "string", "description": "Suchbegriff (Name, E-Mail, …)"},
+                    "limit": {"type": "integer", "default": 20, "description": "Anzahl Ergebnisse"},
+                    "offset": {"type": "integer", "default": 0},
+                },
+            },
+        ),
+        types.Tool(
+            name="hero_get_projects",
+            description="Listet Projekte aus HERO. Optional: Suchbegriff und Seitenanzahl.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "search": {"type": "string"},
+                    "limit": {"type": "integer", "default": 20},
+                    "offset": {"type": "integer", "default": 0},
+                },
+            },
+        ),
+        types.Tool(
+            name="hero_get_documents",
+            description="Listet Dokumente (Angebote, Rechnungen, …) aus HERO.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20},
+                    "offset": {"type": "integer", "default": 0},
+                },
+            },
+        ),
+        types.Tool(
+            name="hero_get_calendar_events",
+            description="Listet Termine aus dem HERO-Kalender.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20},
+                    "offset": {"type": "integer", "default": 0},
+                },
+            },
+        ),
+        types.Tool(
+            name="hero_create_contact",
+            description="Erstellt einen neuen Kontakt in HERO.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "email": {"type": "string"},
+                    "first_name": {"type": "string"},
+                    "last_name": {"type": "string"},
+                    "company_name": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "street": {"type": "string"},
+                    "city": {"type": "string"},
+                    "zipcode": {"type": "string"},
+                    "country_code": {"type": "string", "default": "DE"},
+                },
+                "required": ["email"],
+            },
+        ),
+        types.Tool(
+            name="hero_add_logbook_entry",
+            description="Fügt einen Protokoll-Eintrag zu einem HERO-Projekt hinzu.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "ID des Projekts"},
+                    "message": {"type": "string", "description": "Protokoll-Text"},
+                },
+                "required": ["project_id", "message"],
+            },
+        ),
+        types.Tool(
+            name="hero_graphql",
+            description=(
+                "Führt eine beliebige GraphQL-Abfrage direkt gegen die HERO API aus. "
+                "Für Experten und individuelle Abfragen."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "GraphQL Query oder Mutation"},
+                    "variables": {
+                        "type": "object",
+                        "description": "Optionale GraphQL-Variablen",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tool-Handler
+# ---------------------------------------------------------------------------
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+    try:
+        result = await _dispatch(name, arguments)
+    except Exception as exc:
+        result = {"error": str(exc)}
+    return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+
+async def _dispatch(name: str, args: dict[str, Any]) -> Any:
+    if name == "hero_create_project":
+        return await _create_project(args)
+    if name == "hero_get_contacts":
+        return await _get_contacts(args)
+    if name == "hero_get_projects":
+        return await _get_projects(args)
+    if name == "hero_get_documents":
+        return await _get_documents(args)
+    if name == "hero_get_calendar_events":
+        return await _get_calendar_events(args)
+    if name == "hero_create_contact":
+        return await _create_contact(args)
+    if name == "hero_add_logbook_entry":
+        return await _add_logbook_entry(args)
+    if name == "hero_graphql":
+        return await graphql_query(args["query"], args.get("variables"))
+    raise ValueError(f"Unbekanntes Tool: {name}")
+
+
+# ---------------------------------------------------------------------------
+# Einzelne Implementierungen
+# ---------------------------------------------------------------------------
+
+async def _create_project(args: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "measure": args["measure"],
+        "customer": {"email": args["customer_email"]},
+    }
+    customer = payload["customer"]
+    for key, field in [
+        ("customer_title", "title"),
+        ("customer_first_name", "first_name"),
+        ("customer_last_name", "last_name"),
+        ("customer_company", "company_name"),
+    ]:
+        if args.get(key):
+            customer[field] = args[key]
+
+    if any(args.get(k) for k in ("street", "city", "zipcode")):
+        payload["address"] = {
+            "street": args.get("street", ""),
+            "city": args.get("city", ""),
+            "zipcode": args.get("zipcode", ""),
+            "country_code": args.get("country_code", "DE"),
+        }
+
+    project_match: dict[str, Any] = {}
+    if args.get("comment"):
+        project_match["comment"] = args["comment"]
+    if args.get("partner_notes"):
+        project_match["partner_notes"] = args["partner_notes"]
+    if args.get("partner_source"):
+        project_match["partner_source"] = args["partner_source"]
+    if project_match:
+        payload["project_match"] = project_match
+
+    return await create_project_lead(payload)
+
+
+async def _get_contacts(args: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    query GetContacts($limit: Int, $offset: Int, $search: String) {
+      contacts(first: $limit, skip: $offset, search: $search) {
+        id
+        number
+        first_name
+        last_name
+        email
+        phone
+        company_name
+        address {
+          street
+          city
+          zipcode
+          country_code
+        }
+      }
+    }
+    """
+    variables = {
+        "limit": args.get("limit", 20),
+        "offset": args.get("offset", 0),
+    }
+    if args.get("search"):
+        variables["search"] = args["search"]
+    return await graphql_query(query, variables)
+
+
+async def _get_projects(args: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    query GetProjects($limit: Int, $offset: Int, $search: String) {
+      project_matches(first: $limit, skip: $offset, search: $search) {
+        id
+        number
+        measure
+        status_code
+        contact {
+          first_name
+          last_name
+          email
+          company_name
+        }
+        address {
+          street
+          city
+          zipcode
+        }
+      }
+    }
+    """
+    variables = {
+        "limit": args.get("limit", 20),
+        "offset": args.get("offset", 0),
+    }
+    if args.get("search"):
+        variables["search"] = args["search"]
+    return await graphql_query(query, variables)
+
+
+async def _get_documents(args: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    query GetDocuments($limit: Int, $offset: Int) {
+      customer_documents(first: $limit, skip: $offset) {
+        id
+        number
+        created_at
+        document_type
+        status
+        value
+        vat
+      }
+    }
+    """
+    variables = {
+        "limit": args.get("limit", 20),
+        "offset": args.get("offset", 0),
+    }
+    return await graphql_query(query, variables)
+
+
+async def _get_calendar_events(args: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    query GetCalendarEvents($limit: Int, $offset: Int) {
+      calendar_events(first: $limit, skip: $offset) {
+        id
+        title
+        start_at
+        end_at
+        description
+      }
+    }
+    """
+    variables = {
+        "limit": args.get("limit", 20),
+        "offset": args.get("offset", 0),
+    }
+    return await graphql_query(query, variables)
+
+
+async def _create_contact(args: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    mutation CreateContact($input: ContactInput!) {
+      create_contact(input: $input) {
+        id
+        number
+        email
+        first_name
+        last_name
+      }
+    }
+    """
+    contact_input: dict[str, Any] = {"email": args["email"]}
+    for field in ("first_name", "last_name", "company_name", "phone"):
+        if args.get(field):
+            contact_input[field] = args[field]
+    if any(args.get(k) for k in ("street", "city", "zipcode")):
+        contact_input["address"] = {
+            "street": args.get("street", ""),
+            "city": args.get("city", ""),
+            "zipcode": args.get("zipcode", ""),
+            "country_code": args.get("country_code", "DE"),
+        }
+    return await graphql_query(query, {"input": contact_input})
+
+
+async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
+    query = """
+    mutation AddLogbookEntry($project_id: ID!, $message: String!) {
+      add_logbook_entry(project_id: $project_id, message: $message) {
+        id
+        created_at
+        message
+      }
+    }
+    """
+    return await graphql_query(query, {
+        "project_id": args["project_id"],
+        "message": args["message"],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Einstiegspunkt
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    import asyncio
+    asyncio.run(mcp.server.stdio.run_server(server))
+
+
+if __name__ == "__main__":
+    main()
