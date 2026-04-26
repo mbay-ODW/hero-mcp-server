@@ -393,78 +393,48 @@ def _run_sse() -> None:
     oidc_client_id = os.getenv("OIDC_CLIENT_ID", "")
     oidc_client_secret = os.getenv("OIDC_CLIENT_SECRET", "")
 
-    # Token im Pfad: /sse            → kein Token konfiguriert (lokal/test)
-    # Token im Pfad: /{token}/sse    → Claude.ai trägt die volle URL ein
-    # Bearer {MCP_API_KEY}           → Claude Desktop / API-Clients
-    # Bearer {JWT}                   → Claude.ai via Authelia OAuth (JWT-Introspection)
+    # Auth-Reihenfolge:
+    # 1. Bearer {MCP_API_KEY}  → Claude Desktop / direkte API-Clients
+    # 2. Bearer {JWT}          → Claude.ai via Authelia OIDC (Token Introspection)
 
-    async def _is_authorized(request: Request, path_token: str | None = None) -> bool:
+    async def _is_authorized(request: Request) -> bool:
         if not mcp_api_key:
             return True
 
-        # 1. Token im Pfad (Claude.ai ohne OAuth)
-        if path_token and path_token == mcp_api_key:
-            logging.info("Auth OK: Pfad-Token")
-            return True
-
-        # 2. Statischer Bearer Token (Claude Desktop / API-Clients)
         auth = request.headers.get("Authorization", "")
+
+        # 1. Statischer Bearer Token (Claude Desktop)
         if auth == f"Bearer {mcp_api_key}":
             logging.info("Auth OK: statischer Bearer Token")
             return True
 
-        # 3. Authelia hat den Request bereits validiert (middlewares-authelia@file in Traefik)
-        #    Authelia setzt nach erfolgreicher Validierung den Remote-User Header
-        remote_user = request.headers.get("Remote-User", "")
-        if remote_user:
-            logging.info("Auth OK: Authelia Remote-User=%s", remote_user)
-            return True
-
-        # 4. JWT direkt via Authelia OIDC Introspection (ohne Traefik-Middleware)
-        if auth.startswith("Bearer "):
+        # 2. JWT via Authelia OIDC Token Introspection (Claude.ai)
+        if auth.startswith("Bearer ") and oidc_introspection_url and oidc_client_id and oidc_client_secret:
             jwt_token = auth[7:]
-            logging.info("JWT erhalten, versuche Introspection (erste 20 Zeichen: %s…)", jwt_token[:20])
-            if not oidc_introspection_url:
-                logging.warning("OIDC_INTROSPECTION_URL nicht gesetzt – JWT abgelehnt")
-            elif not oidc_client_id or not oidc_client_secret:
-                logging.warning("OIDC_CLIENT_ID oder OIDC_CLIENT_SECRET fehlt – JWT abgelehnt")
-            else:
-                logging.info("Introspection gegen %s (client_id=%s)", oidc_introspection_url, oidc_client_id)
-                try:
-                    async with _httpx.AsyncClient() as http:
-                        resp = await http.post(
-                            oidc_introspection_url,
-                            data={"token": jwt_token},
-                            auth=(oidc_client_id, oidc_client_secret),
-                            timeout=5.0,
-                        )
-                        body = resp.json()
-                        active = body.get("active", False)
-                        logging.info("Introspection: HTTP %s, active=%s", resp.status_code, active)
-                        return active
-                except Exception as e:
-                    logging.error("Introspection fehlgeschlagen: %s", e)
+            logging.info("JWT erhalten, starte Introspection…")
+            try:
+                async with _httpx.AsyncClient() as http:
+                    resp = await http.post(
+                        oidc_introspection_url,
+                        data={"token": jwt_token},
+                        auth=(oidc_client_id, oidc_client_secret),
+                        timeout=5.0,
+                    )
+                    active = resp.json().get("active", False)
+                    logging.info("Introspection: HTTP %s, active=%s", resp.status_code, active)
+                    return active
+            except Exception as e:
+                logging.error("Introspection fehlgeschlagen: %s", e)
 
-        logging.warning("Auth ABGELEHNT – kein gültiger Token. Headers: %s",
-                        {k: v for k, v in request.headers.items() if k.lower() not in ("cookie",)})
+        logging.warning("Auth ABGELEHNT für %s %s", request.method, request.url.path)
         return False
 
-    sse_plain = SseServerTransport("/messages/")
-    sse_token = SseServerTransport("/t/{token}/messages/")
+    sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
         if not await _is_authorized(request):
             return Response("Unauthorized", status_code=401)
-        async with sse_plain.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await server.run(streams[0], streams[1], server.create_initialization_options())
-
-    async def handle_sse_with_token(request: Request):
-        token = request.path_params.get("token", "")
-        if not await _is_authorized(request, path_token=token):
-            return Response("Unauthorized", status_code=401)
-        async with sse_token.connect_sse(
+        async with sse.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
             await server.run(streams[0], streams[1], server.create_initialization_options())
@@ -472,9 +442,7 @@ def _run_sse() -> None:
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse_plain.handle_post_message),
-            Route("/t/{token}/sse", endpoint=handle_sse_with_token),
-            Mount("/t/{token}/messages/", app=sse_token.handle_post_message),
+            Mount("/messages/", app=sse.handle_post_message),
         ],
     )
 
