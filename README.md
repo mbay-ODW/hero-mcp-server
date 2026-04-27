@@ -1,6 +1,6 @@
 # HERO MCP Server
 
-MCP-Server (Model Context Protocol) für die [HERO Handwerkersoftware](https://hero-software.de). Ermöglicht KI-Assistenten wie Claude den direkten Zugriff auf Kontakte, Projekte, Dokumente und Kalender in HERO.
+MCP-Server (Model Context Protocol) für die [HERO Handwerkersoftware](https://hero-software.de). Ermöglicht KI-Assistenten wie Claude den direkten Zugriff auf Kontakte, Projekte, Dokumente und Kalender in HERO – gesichert über Authelia OIDC OAuth2.
 
 ## Features
 
@@ -17,54 +17,62 @@ MCP-Server (Model Context Protocol) für die [HERO Handwerkersoftware](https://h
 
 ## API-Key beantragen
 
-Den API-Key erhältst du kostenlos beim HERO Support: [hero-software.de/api-doku](https://hero-software.de/api-doku)
+Den HERO API-Key erhältst du kostenlos beim HERO Support: [hero-software.de/api-doku](https://hero-software.de/api-doku)
 
 ---
 
-## Transport-Modi
+## Architektur-Überblick
 
-| Modus | Einsatz | Env-Variable |
-|-------|---------|--------------|
-| `stdio` | Claude Desktop (lokal, kein Netzwerk) | `MCP_TRANSPORT=stdio` (Standard) |
-| `sse` | claude.ai im Browser, Remote via HTTPS | `MCP_TRANSPORT=sse` |
+`hero-mcp.your-domain.com` hat eine Doppelfunktion:
+
+```
+                    ┌─────────────────────────────────┐
+                    │      hero-mcp.your-domain.com        │
+                    └────────────┬────────────────────┘
+                                 │ Traefik
+          ┌──────────────────────┴──────────────────────┐
+          │ Pfad-basiertes Routing                       │
+          │                                              │
+          ▼ /authorize, /api/oidc, /consent,             ▼ /sse, /messages/
+          │ /.well-known, /static, /api, /               │
+    ┌─────┴──────┐                               ┌───────┴────────┐
+    │  Authelia  │  ←── OIDC Issuer              │ hero-mcp-server│
+    │  :9091     │      Token Introspection       │  :8000 (SSE)   │
+    └────────────┘                               └────────────────┘
+```
+
+**Traefik-Routing:**
+- OIDC-Pfade (`/authorize`, `/api/oidc`, `/.well-known`, `/consent`, `/static`, `/api`, `/`) → **Authelia** (via file-based rules)
+- MCP-Pfade (`/sse`, `/messages/`) → **hero-mcp-server** (via Docker labels)
+
+**Auth-Flow:**
+1. Claude.ai entdeckt OIDC-Config via `https://hero-mcp.your-domain.com/.well-known/openid-configuration`
+2. Benutzer authentifiziert sich bei Authelia
+3. Claude.ai erhält JWT Access Token
+4. Claude.ai sendet `Bearer {JWT}` an `/sse`
+5. hero-mcp-server validiert JWT via Authelia Token Introspection (`http://authelia:9091/api/oidc/introspection`)
 
 ---
 
 ## Option A: Lokal mit Claude Desktop (stdio)
 
-Einfachster und sicherster Weg. Claude Desktop startet den Server als lokalen Prozess – keine offenen Ports, kein Netzwerkzugriff.
+Einfachster und sicherster Weg – kein Netzwerkzugriff, keine offenen Ports.
 
 ### Voraussetzungen
-
 - Python 3.11+
 - [Claude Desktop](https://claude.ai/download)
-
-### 1. Repository klonen
 
 ```bash
 git clone https://github.com/your-github-user/hero-mcp-server.git
 cd hero-mcp-server
-```
-
-### 2. Abhängigkeiten installieren
-
-```bash
 python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -e .
-```
-
-### 3. API-Key konfigurieren
-
-```bash
 cp .env.example .env
 # HERO_API_KEY in .env eintragen
 ```
 
-### 4. Claude Desktop konfigurieren
-
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+Claude Desktop konfigurieren (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
@@ -79,143 +87,180 @@ cp .env.example .env
 }
 ```
 
-### 5. Claude Desktop neu starten
-
-Der HERO-Server erscheint automatisch unter den verfügbaren Tools.
-
 ---
 
 ## Option B: Docker + Traefik + Authelia OAuth (claude.ai im Browser)
 
-Für den Einsatz mit claude.ai im Browser. Authentifizierung erfolgt über **Authelia OIDC OAuth** – kein Token in der URL nötig.
+### Schritt 1: Authelia OIDC-Client konfigurieren
 
-### Voraussetzungen
-
-- Docker + Portainer
-- Traefik als Reverse Proxy
-- Authelia als OIDC-Provider mit konfiguriertem OAuth-Client
-
-### Authelia: OIDC-Client anlegen
-
-In der Authelia-Konfiguration (`configuration.yml`) einen Client für Claude hinzufügen:
+In `/docker-data/traefik/authelia/configuration.yml` unter `identity_providers.oidc.clients` eintragen:
 
 ```yaml
 identity_providers:
   oidc:
     clients:
       - client_id: claude-mcp
-        client_secret: 'dein_client_secret_hash'  # bcrypt-Hash
+        client_name: Claude MCP
+        client_secret: '$2b$12$HASH_DEINES_SECRETS'  # bcrypt-Hash des Plaintext-Secrets
+        public: false
         authorization_policy: one_factor
         redirect_uris:
           - https://claude.ai/api/mcp/auth_callback
-        scopes:
-          - openid
-          - profile
-          - email
-        grant_types:
-          - authorization_code
-        response_types:
-          - code
+        scopes: [openid, profile, email, offline_access, address, phone, groups]
+        grant_types: [authorization_code, refresh_token]
+        response_types: [code]
         token_endpoint_auth_method: client_secret_post
 ```
 
-### Portainer Stack
+> **Hinweis:** `client_secret` muss als bcrypt-Hash hinterlegt werden. Den Hash erzeugen mit:
+> ```bash
+> docker run authelia/authelia:latest authelia crypto hash generate bcrypt --password 'dein_secret'
+> ```
 
-**Stacks → Add Stack**, dann folgenden Inhalt einfügen:
+### Schritt 2: Traefik Routing-Regeln (file-based)
+
+Datei `/docker-data/traefik/rules/hero-mcp-oauth.yml` anlegen:
+
+```yaml
+http:
+  middlewares:
+    rewrite-authorize:
+      replacePath:
+        path: "/api/oidc/authorization"
+
+  routers:
+    hero-mcp-authorize:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/authorize`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      middlewares: [rewrite-authorize]
+      tls:
+        certResolver: mydnschallenge
+
+    hero-mcp-root:
+      rule: "Host(`hero-mcp.your-domain.com`) && Path(`/`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    hero-mcp-oidc:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/api/oidc`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    hero-mcp-api:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/api`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    hero-mcp-consent:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/consent`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    hero-mcp-static:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/static`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+    hero-mcp-wellknown:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/.well-known`)"
+      entrypoints: [websecure]
+      service: authelia-oidc
+      tls:
+        certResolver: mydnschallenge
+
+  services:
+    authelia-oidc:
+      loadBalancer:
+        servers:
+          - url: "http://authelia:9091"
+```
+
+> Traefik erkennt die Datei automatisch (hot-reload) – kein Neustart nötig.
+
+### Schritt 3: Portainer Stack
 
 ```yaml
 services:
   hero-mcp-server:
-    build:
-      context: https://github.com/your-github-user/hero-mcp-server.git
-      dockerfile: Dockerfile
+    image: ghcr.io/your-github-user/hero-mcp-server:latest
     container_name: hero-mcp-server
     restart: unless-stopped
     environment:
       - HERO_API_KEY=dein_hero_api_key
       - MCP_TRANSPORT=sse
-      - MCP_API_KEY=dein_statischer_fallback_token   # optional, für Claude Desktop im SSE-Modus
+      - MCP_API_KEY=optionaler_fallback_token      # nur für Claude Desktop im SSE-Modus
       - PORT=8000
       - OIDC_INTROSPECTION_URL=http://authelia:9091/api/oidc/introspection
       - OIDC_CLIENT_ID=claude-mcp
-      - OIDC_CLIENT_SECRET=dein_client_secret_plaintext
+      - OIDC_CLIENT_SECRET=plaintext_des_secrets   # Klartext (nicht der bcrypt-Hash!)
     expose:
       - "8000"
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik
-      - traefik.http.routers.hero-mcp.rule=Host(`hero-mcp.deine-domain.de`)
+      - traefik.http.routers.hero-mcp.rule=Host(`hero-mcp.your-domain.com`) && PathPrefix(`/sse`, `/messages`)
       - traefik.http.routers.hero-mcp.entrypoints=websecure
       - traefik.http.services.hero-mcp.loadbalancer.server.port=8000
       - traefik.http.routers.hero-mcp.tls.certresolver=mydnschallenge
       - traefik.http.routers.hero-mcp.tls=true
-      # Kein middlewares-authelia@file – Authelia-ForwardAuth ist für Browser-Sessions,
-      # nicht für Bearer-Token. JWT-Validierung läuft direkt im Server via Introspection.
       - traefik.http.routers.hero-mcp.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file
     networks:
-      - traefik   # Authelia muss im selben Netzwerk erreichbar sein
+      - traefik
 
 networks:
   traefik:
     external: true
 ```
 
-### claude.ai Connector einrichten
+> **Wichtig:** `OIDC_CLIENT_SECRET` ist der **Klartext** des Secrets (z.B. `theater-unwatched-tapeless`), nicht der bcrypt-Hash – den braucht nur Authelia.
+
+> **Kein `middlewares-authelia@file`!** Authelias ForwardAuth-Middleware ist für Browser-Sessions (Cookies). Claude.ai sendet Bearer-JWTs – diese werden direkt im Server via Token Introspection validiert.
+
+### Schritt 4: claude.ai Connector einrichten
 
 In claude.ai → **Settings → Integrations → Add custom connector**:
 
-- **Name:** `Hero`
-- **URL:** `https://hero-mcp.deine-domain.de/sse`
-- **OAuth Client ID:** `claude-mcp`
-- **OAuth Client Secret:** `dein_client_secret_plaintext`
+| Feld | Wert |
+|------|------|
+| Name | `Hero` |
+| URL | `https://hero-mcp.your-domain.com/sse` |
+| OAuth Client ID | `claude-mcp` |
+| OAuth Client Secret | `theater-unwatched-tapeless` (Klartext) |
 
-Claude.ai übernimmt den kompletten OAuth-Flow mit Authelia automatisch.
-
-### Automatische Updates
-
-GitHub Actions baut bei jedem Push auf `main` ein neues Image. In Portainer **"Update the stack"** klicken, um die neueste Version zu laden.
-
----
-
-## Authentifizierung: Wie es funktioniert
-
-### claude.ai (Browser) via OAuth
-
-```
-claude.ai → OAuth-Flow → Authelia → JWT Access Token
-         → Bearer {JWT} → Traefik → hero-mcp-server
-                                   → OIDC Introspection → Authelia
-                                   → active: true → Zugriff erlaubt
-```
-
-### Claude Desktop (lokal)
-
-```
-Claude Desktop → startet Prozess lokal (stdio) → kein Netzwerk
-```
-
-### Claude Desktop im SSE-Modus (optional)
-
-```
-Claude Desktop → Bearer {MCP_API_KEY} → Traefik → hero-mcp-server → Zugriff erlaubt
-```
+Claude.ai führt den OAuth-Flow automatisch durch – Authelia zeigt eine Login-Seite, danach ist die Verbindung aktiv.
 
 ---
 
 ## Sicherheit
 
-| Maßnahme | Beschreibung |
-|----------|-------------|
-| HTTPS/TLS | Traefik mit Let's Encrypt |
-| Authelia OIDC OAuth | Industrie-Standard, kein Token in der URL |
-| JWT Introspection | Server validiert jeden Token live gegen Authelia |
-| Rate Limiting | Traefik-Middleware verhindert Brute-Force |
+| Maßnahme | Details |
+|----------|---------|
+| HTTPS/TLS | Traefik + Let's Encrypt (Cloudflare DNS Challenge) |
+| OAuth2 / OIDC | Authelia als Issuer, JWT Access Tokens |
+| Token Introspection | Jeder Token wird live gegen Authelia validiert |
+| bcrypt Client Secret | Authelia speichert nur den Hash, nie den Klartext |
+| Rate Limiting | Traefik-Middleware |
 | Secure Headers | HSTS, X-Frame-Options etc. via Traefik |
-| HERO API Key | Nur in Container-Umgebung, nie im Image/Repo |
+| HERO API Key | Nur in Container-Umgebung, nie im Image oder Repo |
 
-### Warum kein `middlewares-authelia@file` im Traefik-Label?
+---
 
-Authelias ForwardAuth-Middleware ist für **Browser-Sessions (Cookies)** ausgelegt. Claude.ai sendet nach dem OAuth-Flow einen **Bearer JWT Access Token** – den kennt ForwardAuth nicht und blockt mit 401. Die JWT-Validierung erfolgt daher direkt im Server via Token Introspection gegen Authelias OIDC-Endpunkt.
+## Automatische Updates
+
+GitHub Actions baut bei jedem Push auf `main` automatisch ein neues Image und veröffentlicht es auf `ghcr.io/your-github-user/hero-mcp-server:latest`.
+
+In Portainer: **Stack → Update → "Re-pull image" → Deploy**
 
 ---
 
@@ -226,11 +271,11 @@ hero-mcp-server/
 ├── src/
 │   └── hero_mcp_server/
 │       ├── __init__.py
-│       ├── server.py        # MCP-Server, Tools & SSE/OAuth-Transport
+│       ├── server.py        # MCP-Server, Tools, SSE-Transport & OIDC-Auth
 │       └── client.py        # HERO API Client (REST Lead API + GraphQL)
 ├── .github/
 │   └── workflows/
-│       └── docker.yml       # Automatischer Docker-Build via GitHub Actions
+│       └── docker.yml       # Automatischer Docker-Build → ghcr.io
 ├── .env.example
 ├── claude_desktop_config.json
 ├── Dockerfile
@@ -242,5 +287,5 @@ hero-mcp-server/
 
 - [HERO Lead API](https://hero-software.de/api-doku/lead-api)
 - [HERO GraphQL Guide](https://hero-software.de/api-doku/graphql-guide)
-- [MCP Protokoll Dokumentation](https://modelcontextprotocol.io)
-- [Authelia OIDC Konfiguration](https://www.authelia.com/configuration/identity-providers/openid-connect/provider/)
+- [MCP Protokoll](https://modelcontextprotocol.io)
+- [Authelia OIDC](https://www.authelia.com/configuration/identity-providers/openid-connect/provider/)
