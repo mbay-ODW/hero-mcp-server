@@ -8,7 +8,9 @@ import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import os
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, _log_level, logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
 
 from .client import create_project_lead, graphql_query
 
@@ -399,10 +401,13 @@ def _run_sse() -> None:
     # 2. Bearer {JWT}          → Claude.ai via Authelia OIDC (Token Introspection)
 
     async def _is_authorized(request: Request) -> bool:
+        logging.debug("Auth-Check: %s %s", request.method, request.url.path)
         if not mcp_api_key:
+            logging.debug("Kein MCP_API_KEY konfiguriert – Auth übersprungen")
             return True
 
         auth = request.headers.get("Authorization", "")
+        logging.debug("Authorization-Header: %s", auth[:30] + "…" if len(auth) > 30 else auth or "(leer)")
 
         # 1. Statischer Bearer Token (Claude Desktop)
         if auth == f"Bearer {mcp_api_key}":
@@ -412,7 +417,7 @@ def _run_sse() -> None:
         # 2. JWT via Authelia OIDC Token Introspection (Claude.ai)
         if auth.startswith("Bearer ") and oidc_introspection_url and oidc_client_id and oidc_client_secret:
             jwt_token = auth[7:]
-            logging.info("JWT erhalten, starte Introspection…")
+            logging.info("JWT erhalten, starte Introspection gegen %s", oidc_introspection_url)
             try:
                 async with _httpx.AsyncClient() as http:
                     resp = await http.post(
@@ -421,11 +426,15 @@ def _run_sse() -> None:
                         auth=(oidc_client_id, oidc_client_secret),
                         timeout=5.0,
                     )
-                    active = resp.json().get("active", False)
+                    data = resp.json()
+                    active = data.get("active", False)
                     logging.info("Introspection: HTTP %s, active=%s", resp.status_code, active)
+                    logging.debug("Introspection Response: %s", data)
                     return active
             except Exception as e:
                 logging.error("Introspection fehlgeschlagen: %s", e)
+        elif auth.startswith("Bearer "):
+            logging.warning("JWT empfangen aber OIDC nicht konfiguriert (OIDC_INTROSPECTION_URL fehlt?)")
 
         logging.warning("Auth ABGELEHNT für %s %s", request.method, request.url.path)
         return False
@@ -433,8 +442,11 @@ def _run_sse() -> None:
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
+        logging.debug("SSE-Verbindung eingehend von %s", request.client)
         if not await _is_authorized(request):
+            logging.warning("SSE abgewiesen – nicht autorisiert")
             return Response("Unauthorized", status_code=401)
+        logging.info("SSE-Verbindung akzeptiert")
         async with sse.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:

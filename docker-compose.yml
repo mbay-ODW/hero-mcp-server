@@ -11,6 +11,7 @@ services:
       - OIDC_INTROSPECTION_URL=http://authelia:9091/api/oidc/introspection
       - OIDC_CLIENT_ID=claude-mcp
       - OIDC_CLIENT_SECRET=dein_secret_klartext
+      - LOG_LEVEL=INFO     # DEBUG für detaillierte Auth-Logs, INFO für normal
     expose:
       - "8000"
     labels:
