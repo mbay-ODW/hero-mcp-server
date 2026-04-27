@@ -27,7 +27,7 @@ Den HERO API-Key erhältst du kostenlos beim HERO Support: [hero-software.de/api
 
 ```
                     ┌─────────────────────────────────┐
-                    │      hero-mcp.your-domain.com        │
+                    │    hero-mcp.your-domain.com      │
                     └────────────┬────────────────────┘
                                  │ Traefik
           ┌──────────────────────┴──────────────────────┐
@@ -91,9 +91,12 @@ Claude Desktop konfigurieren (`~/Library/Application Support/Claude/claude_deskt
 
 ## Option B: Docker + Traefik + Authelia OAuth (claude.ai im Browser)
 
+Fertige Beispiel-Dateien liegen im [`examples/`](examples/) Verzeichnis.
+
 ### Schritt 1: Authelia OIDC-Client konfigurieren
 
-In `/docker-data/traefik/authelia/configuration.yml` unter `identity_providers.oidc.clients` eintragen:
+In deine Authelia `configuration.yml` unter `identity_providers.oidc.clients` eintragen
+(Vorlage: [`examples/authelia-oidc-client.yml`](examples/authelia-oidc-client.yml)):
 
 ```yaml
 identity_providers:
@@ -101,7 +104,7 @@ identity_providers:
     clients:
       - client_id: claude-mcp
         client_name: Claude MCP
-        client_secret: '$2b$12$HASH_DEINES_SECRETS'  # bcrypt-Hash des Plaintext-Secrets
+        client_secret: '$2b$12$BCRYPT_HASH_OF_YOUR_SECRET'  # bcrypt-Hash
         public: false
         authorization_policy: one_factor
         redirect_uris:
@@ -112,14 +115,15 @@ identity_providers:
         token_endpoint_auth_method: client_secret_post
 ```
 
-> **Hinweis:** `client_secret` muss als bcrypt-Hash hinterlegt werden. Den Hash erzeugen mit:
+> **bcrypt-Hash erzeugen:**
 > ```bash
 > docker run authelia/authelia:latest authelia crypto hash generate bcrypt --password 'dein_secret'
 > ```
 
 ### Schritt 2: Traefik Routing-Regeln (file-based)
 
-Datei `/docker-data/traefik/rules/hero-mcp-oauth.yml` anlegen:
+Datei in deinem Traefik-Rules-Verzeichnis ablegen
+(Vorlage: [`examples/traefik-hero-mcp-oauth.yml`](examples/traefik-hero-mcp-oauth.yml)):
 
 ```yaml
 http:
@@ -135,49 +139,49 @@ http:
       service: authelia-oidc
       middlewares: [rewrite-authorize]
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
     hero-mcp-root:
       rule: "Host(`hero-mcp.your-domain.com`) && Path(`/`)"
       entrypoints: [websecure]
       service: authelia-oidc
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
     hero-mcp-oidc:
       rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/api/oidc`)"
       entrypoints: [websecure]
       service: authelia-oidc
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
     hero-mcp-api:
       rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/api`)"
       entrypoints: [websecure]
       service: authelia-oidc
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
     hero-mcp-consent:
       rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/consent`)"
       entrypoints: [websecure]
       service: authelia-oidc
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
     hero-mcp-static:
       rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/static`)"
       entrypoints: [websecure]
       service: authelia-oidc
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
     hero-mcp-wellknown:
       rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/.well-known`)"
       entrypoints: [websecure]
       service: authelia-oidc
       tls:
-        certResolver: mydnschallenge
+        certResolver: your-cert-resolver
 
   services:
     authelia-oidc:
@@ -199,11 +203,11 @@ services:
     environment:
       - HERO_API_KEY=dein_hero_api_key
       - MCP_TRANSPORT=sse
-      - MCP_API_KEY=optionaler_fallback_token      # nur für Claude Desktop im SSE-Modus
+      - MCP_API_KEY=optionaler_fallback_token       # nur für Claude Desktop im SSE-Modus
       - PORT=8000
       - OIDC_INTROSPECTION_URL=http://authelia:9091/api/oidc/introspection
       - OIDC_CLIENT_ID=claude-mcp
-      - OIDC_CLIENT_SECRET=plaintext_des_secrets   # Klartext (nicht der bcrypt-Hash!)
+      - OIDC_CLIENT_SECRET=dein_secret_klartext     # Klartext (nicht der bcrypt-Hash!)
     expose:
       - "8000"
     labels:
@@ -212,7 +216,7 @@ services:
       - traefik.http.routers.hero-mcp.rule=Host(`hero-mcp.your-domain.com`) && PathPrefix(`/sse`, `/messages`)
       - traefik.http.routers.hero-mcp.entrypoints=websecure
       - traefik.http.services.hero-mcp.loadbalancer.server.port=8000
-      - traefik.http.routers.hero-mcp.tls.certresolver=mydnschallenge
+      - traefik.http.routers.hero-mcp.tls.certresolver=your-cert-resolver
       - traefik.http.routers.hero-mcp.tls=true
       - traefik.http.routers.hero-mcp.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file
     networks:
@@ -223,7 +227,7 @@ networks:
     external: true
 ```
 
-> **Wichtig:** `OIDC_CLIENT_SECRET` ist der **Klartext** des Secrets (z.B. `theater-unwatched-tapeless`), nicht der bcrypt-Hash – den braucht nur Authelia.
+> **Wichtig:** `OIDC_CLIENT_SECRET` = **Klartext** des Secrets. Den bcrypt-Hash braucht nur Authelia.
 
 > **Kein `middlewares-authelia@file`!** Authelias ForwardAuth-Middleware ist für Browser-Sessions (Cookies). Claude.ai sendet Bearer-JWTs – diese werden direkt im Server via Token Introspection validiert.
 
@@ -236,7 +240,7 @@ In claude.ai → **Settings → Integrations → Add custom connector**:
 | Name | `Hero` |
 | URL | `https://hero-mcp.your-domain.com/sse` |
 | OAuth Client ID | `claude-mcp` |
-| OAuth Client Secret | `theater-unwatched-tapeless` (Klartext) |
+| OAuth Client Secret | `dein_secret_klartext` |
 
 Claude.ai führt den OAuth-Flow automatisch durch – Authelia zeigt eine Login-Seite, danach ist die Verbindung aktiv.
 
@@ -246,7 +250,7 @@ Claude.ai führt den OAuth-Flow automatisch durch – Authelia zeigt eine Login-
 
 | Maßnahme | Details |
 |----------|---------|
-| HTTPS/TLS | Traefik + Let's Encrypt (Cloudflare DNS Challenge) |
+| HTTPS/TLS | Traefik + Let's Encrypt |
 | OAuth2 / OIDC | Authelia als Issuer, JWT Access Tokens |
 | Token Introspection | Jeder Token wird live gegen Authelia validiert |
 | bcrypt Client Secret | Authelia speichert nur den Hash, nie den Klartext |
@@ -273,6 +277,9 @@ hero-mcp-server/
 │       ├── __init__.py
 │       ├── server.py        # MCP-Server, Tools, SSE-Transport & OIDC-Auth
 │       └── client.py        # HERO API Client (REST Lead API + GraphQL)
+├── examples/
+│   ├── traefik-hero-mcp-oauth.yml   # Traefik file-based routing rules
+│   └── authelia-oidc-client.yml     # Authelia OIDC-Client Konfiguration
 ├── .github/
 │   └── workflows/
 │       └── docker.yml       # Automatischer Docker-Build → ghcr.io

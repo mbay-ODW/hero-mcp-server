@@ -1,0 +1,70 @@
+http:
+  middlewares:
+    rewrite-authorize:
+      replacePath:
+        path: "/api/oidc/authorization"
+
+  routers:
+    hero-mcp-authorize:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/authorize`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      middlewares:
+        - rewrite-authorize
+      tls:
+        certResolver: your-cert-resolver
+
+    hero-mcp-root:
+      rule: "Host(`hero-mcp.your-domain.com`) && Path(`/`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      tls:
+        certResolver: your-cert-resolver
+
+    hero-mcp-oidc:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/api/oidc`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      tls:
+        certResolver: your-cert-resolver
+
+    hero-mcp-api:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/api`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      tls:
+        certResolver: your-cert-resolver
+
+    hero-mcp-consent:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/consent`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      tls:
+        certResolver: your-cert-resolver
+
+    hero-mcp-static:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/static`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      tls:
+        certResolver: your-cert-resolver
+
+    hero-mcp-wellknown:
+      rule: "Host(`hero-mcp.your-domain.com`) && PathPrefix(`/.well-known`)"
+      entrypoints:
+        - websecure
+      service: authelia-oidc
+      tls:
+        certResolver: your-cert-resolver
+
+  services:
+    authelia-oidc:
+      loadBalancer:
+        servers:
+          - url: "http://authelia:9091"

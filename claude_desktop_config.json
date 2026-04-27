@@ -1,15 +1,9 @@
 {
   "mcpServers": {
     "hero": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/Users/marco/Library/CloudStorage/OneDrive-Persönlich/Projekte/hero-mcp-server",
-        "hero-mcp-server"
-      ],
+      "command": "/absoluter/pfad/zum/hero-mcp-server/.venv/bin/hero-mcp-server",
       "env": {
-        "HERO_API_KEY": "DEINEN_API_KEY_HIER_EINTRAGEN"
+        "HERO_API_KEY": "dein_hero_api_key"
       }
     }
   }
