@@ -1,38 +1,37 @@
 services:
   hero-mcp-server:
-    image: ghcr.io/your-github-user/hero-mcp-server:latest
+    image: ghcr.io/mbay-odw/hero-mcp-server:latest
     container_name: hero-mcp-server
     restart: unless-stopped
     environment:
-      - HERO_API_KEY=dein_hero_api_key
+      - LOG_LEVEL=INFO
       - MCP_TRANSPORT=sse
-      - MCP_API_KEY=optionaler_fallback_token
       - PORT=8000
-      - OIDC_INTROSPECTION_URL=http://authelia:9091/api/oidc/introspection
-      - OIDC_CLIENT_ID=claude-mcp
-      - OIDC_CLIENT_SECRET=dein_secret_klartext
-      - LOG_LEVEL=INFO     # DEBUG für detaillierte Auth-Logs, INFO für normal
+      # Hero API
+      - HERO_API_KEY=${HERO_API_KEY}
+      # Auth
+      - MCP_API_KEY=${MCP_API_KEY}
+      - OIDC_INTROSPECTION_URL=https://hero-mcp.${DOMAIN}/api/oidc/introspection
+      - OIDC_CLIENT_ID=hero-mcp
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
     expose:
       - "8000"
     labels:
-      - traefik.enable=true
-      - traefik.docker.network=traefik
-      # Router für /sse
-      - traefik.http.routers.hero-mcp-sse.rule=Host(`hero-mcp.your-domain.com`) && PathPrefix(`/sse`)
-      - traefik.http.routers.hero-mcp-sse.entrypoints=websecure
-      - traefik.http.routers.hero-mcp-sse.service=hero-mcp-svc
-      - traefik.http.routers.hero-mcp-sse.tls.certresolver=your-cert-resolver
-      - traefik.http.routers.hero-mcp-sse.tls=true
-      - traefik.http.routers.hero-mcp-sse.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file
-      # Router für /messages
-      - traefik.http.routers.hero-mcp-msg.rule=Host(`hero-mcp.your-domain.com`) && PathPrefix(`/messages`)
-      - traefik.http.routers.hero-mcp-msg.entrypoints=websecure
-      - traefik.http.routers.hero-mcp-msg.service=hero-mcp-svc
-      - traefik.http.routers.hero-mcp-msg.tls.certresolver=your-cert-resolver
-      - traefik.http.routers.hero-mcp-msg.tls=true
-      - traefik.http.routers.hero-mcp-msg.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file
-      # Service
-      - traefik.http.services.hero-mcp-svc.loadbalancer.server.port=8000
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"
+      - "traefik.http.routers.hero-mcp-sse.rule=Host(`hero-mcp.${DOMAIN}`) && PathPrefix(`/sse`)"
+      - "traefik.http.routers.hero-mcp-sse.entrypoints=websecure"
+      - "traefik.http.routers.hero-mcp-sse.service=hero-mcp-svc"
+      - "traefik.http.routers.hero-mcp-sse.tls=true"
+      - "traefik.http.routers.hero-mcp-sse.tls.certresolver=mydnschallenge"
+      - "traefik.http.routers.hero-mcp-sse.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
+      - "traefik.http.routers.hero-mcp-msg.rule=Host(`hero-mcp.${DOMAIN}`) && PathPrefix(`/messages`)"
+      - "traefik.http.routers.hero-mcp-msg.entrypoints=websecure"
+      - "traefik.http.routers.hero-mcp-msg.service=hero-mcp-svc"
+      - "traefik.http.routers.hero-mcp-msg.tls=true"
+      - "traefik.http.routers.hero-mcp-msg.tls.certresolver=mydnschallenge"
+      - "traefik.http.routers.hero-mcp-msg.middlewares=middlewares-rate-limit@file,middlewares-secure-headers@file"
+      - "traefik.http.services.hero-mcp-svc.loadbalancer.server.port=8000"
     networks:
       - traefik
 
