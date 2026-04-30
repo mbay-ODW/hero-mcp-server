@@ -9,10 +9,14 @@ import mcp.types as types
 from mcp.server import Server
 
 import os
-_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, _log_level, logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
 
-from .client import create_project_lead, graphql_query
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+from .client import graphql_query, graphql_upload  # noqa: E402
 
 server = Server("hero-mcp-server")
 
@@ -21,36 +25,42 @@ server = Server("hero-mcp-server")
 # Tool-Definitionen
 # ---------------------------------------------------------------------------
 
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
         types.Tool(
             name="hero_create_project",
             description=(
-                "Legt ein neues Projekt (Lead) in HERO an. "
-                "Pflichtfeld: measure (Gewerk-Kürzel, z.B. 'PRJ') und customer.email."
+                "Legt ein neues Projekt in HERO an via create_project_match-Mutation. "
+                "Benötigt customer_id und measure_id (IDs aus hero_get_contacts bzw. der API). "
+                "Tipp: customer_id aus hero_get_contacts beziehen, measure_id über hero_graphql abfragen."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "measure": {
+                    "customer_id": {
                         "type": "string",
-                        "description": "Gewerk-Kürzel, z.B. 'PRJ', 'HZG', 'SAN'",
+                        "description": "ID des Kunden/Kontakts (nicht contact_id!)",
                     },
-                    "customer_email": {"type": "string", "description": "E-Mail des Kunden"},
-                    "customer_title": {"type": "string", "description": "Anrede (Herr/Frau)"},
-                    "customer_first_name": {"type": "string"},
-                    "customer_last_name": {"type": "string"},
-                    "customer_company": {"type": "string", "description": "Firmenname"},
-                    "street": {"type": "string"},
-                    "city": {"type": "string"},
-                    "zipcode": {"type": "string"},
-                    "country_code": {"type": "string", "default": "DE"},
-                    "comment": {"type": "string", "description": "Eintrag ins Projektprotokoll"},
-                    "partner_notes": {"type": "string", "description": "Notiz-Feld"},
-                    "partner_source": {"type": "string", "description": "Lead-Quelle"},
+                    "measure_id": {
+                        "type": "string",
+                        "description": "ID des Gewerks (z.B. via hero_graphql: { measures { id name } })",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Projektname (optional)",
+                    },
+                    "type_id": {
+                        "type": "string",
+                        "description": "Projekttyp-ID (optional)",
+                    },
+                    "address_id": {
+                        "type": "string",
+                        "description": "Adress-ID für das Projekt (optional)",
+                    },
                 },
-                "required": ["measure", "customer_email"],
+                "required": ["customer_id", "measure_id"],
             },
         ),
         types.Tool(
@@ -59,8 +69,15 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "search": {"type": "string", "description": "Suchbegriff (Name, E-Mail, …)"},
-                    "limit": {"type": "integer", "default": 20, "description": "Anzahl Ergebnisse"},
+                    "search": {
+                        "type": "string",
+                        "description": "Suchbegriff (Name, E-Mail, …)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Anzahl Ergebnisse",
+                    },
                     "offset": {"type": "integer", "default": 0},
                 },
             },
@@ -131,6 +148,39 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="hero_upload_document",
+            description=(
+                "Lädt eine Datei als Dokument in die Dokumentenablage eines HERO-Projekts hoch. "
+                "Die Datei wird als base64-kodierter String übergeben."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "ID des HERO-Projekts",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Dateiname inklusive Erweiterung, z.B. 'angebot.pdf'",
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "description": "MIME-Typ der Datei, z.B. 'application/pdf' oder 'image/jpeg'",
+                    },
+                    "data_base64": {
+                        "type": "string",
+                        "description": "Dateiinhalt als base64-kodierter String",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Dokumentkategorie (optional)",
+                    },
+                },
+                "required": ["project_id", "filename", "content_type", "data_base64"],
+            },
+        ),
+        types.Tool(
             name="hero_graphql",
             description=(
                 "Führt eine beliebige GraphQL-Abfrage direkt gegen die HERO API aus. "
@@ -139,7 +189,10 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "GraphQL Query oder Mutation"},
+                    "query": {
+                        "type": "string",
+                        "description": "GraphQL Query oder Mutation",
+                    },
                     "variables": {
                         "type": "object",
                         "description": "Optionale GraphQL-Variablen",
@@ -155,13 +208,18 @@ async def list_tools() -> list[types.Tool]:
 # Tool-Handler
 # ---------------------------------------------------------------------------
 
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     try:
         result = await _dispatch(name, arguments)
     except Exception as exc:
         result = {"error": str(exc)}
-    return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+    return [
+        types.TextContent(
+            type="text", text=json.dumps(result, ensure_ascii=False, indent=2)
+        )
+    ]
 
 
 async def _dispatch(name: str, args: dict[str, Any]) -> Any:
@@ -179,6 +237,8 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         return await _create_contact(args)
     if name == "hero_add_logbook_entry":
         return await _add_logbook_entry(args)
+    if name == "hero_upload_document":
+        return await _upload_document(args)
     if name == "hero_graphql":
         return await graphql_query(args["query"], args.get("variables"))
     raise ValueError(f"Unbekanntes Tool: {name}")
@@ -188,40 +248,27 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 # Einzelne Implementierungen
 # ---------------------------------------------------------------------------
 
+
 async def _create_project(args: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "measure": args["measure"],
-        "customer": {"email": args["customer_email"]},
+    project_match_input: dict[str, Any] = {
+        "customer_id": args["customer_id"],
+        "measure_id": args["measure_id"],
     }
-    customer = payload["customer"]
-    for key, field in [
-        ("customer_title", "title"),
-        ("customer_first_name", "first_name"),
-        ("customer_last_name", "last_name"),
-        ("customer_company", "company_name"),
-    ]:
-        if args.get(key):
-            customer[field] = args[key]
+    for field in ("name", "type_id", "address_id"):
+        if args.get(field):
+            project_match_input[field] = args[field]
 
-    if any(args.get(k) for k in ("street", "city", "zipcode")):
-        payload["address"] = {
-            "street": args.get("street", ""),
-            "city": args.get("city", ""),
-            "zipcode": args.get("zipcode", ""),
-            "country_code": args.get("country_code", "DE"),
-        }
-
-    project_match: dict[str, Any] = {}
-    if args.get("comment"):
-        project_match["comment"] = args["comment"]
-    if args.get("partner_notes"):
-        project_match["partner_notes"] = args["partner_notes"]
-    if args.get("partner_source"):
-        project_match["partner_source"] = args["partner_source"]
-    if project_match:
-        payload["project_match"] = project_match
-
-    return await create_project_lead(payload)
+    query = """
+    mutation CreateProjectMatch($project_match: ProjectMatchInput!) {
+      create_project_match(project_match: $project_match) {
+        id
+        name
+        project_nr
+        display_id
+      }
+    }
+    """
+    return await graphql_query(query, {"project_match": project_match_input})
 
 
 async def _get_contacts(args: dict[str, Any]) -> dict[str, Any]:
@@ -327,19 +374,14 @@ async def _get_calendar_events(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _create_contact(args: dict[str, Any]) -> dict[str, Any]:
-    query = """
-    mutation CreateContact($input: ContactInput!) {
-      create_contact(input: $input) {
-        id
-        nr
-        email
-        first_name
-        last_name
-      }
-    }
-    """
     contact_input: dict[str, Any] = {"email": args["email"]}
-    for field in ("first_name", "last_name", "company_name", "phone_home", "phone_mobile"):
+    for field in (
+        "first_name",
+        "last_name",
+        "company_name",
+        "phone_home",
+        "phone_mobile",
+    ):
         if args.get(field):
             contact_input[field] = args[field]
     if any(args.get(k) for k in ("street", "city", "zipcode")):
@@ -348,7 +390,19 @@ async def _create_contact(args: dict[str, Any]) -> dict[str, Any]:
             "city": args.get("city", ""),
             "zipcode": args.get("zipcode", ""),
         }
-    return await graphql_query(query, {"input": contact_input})
+
+    query = """
+    mutation CreateContact($contact: ContactInput!) {
+      create_contact(contact: $contact) {
+        id
+        nr
+        email
+        first_name
+        last_name
+      }
+    }
+    """
+    return await graphql_query(query, {"contact": contact_input})
 
 
 async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
@@ -361,19 +415,53 @@ async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
       }
     }
     """
-    return await graphql_query(query, {
+    return await graphql_query(
+        query,
+        {
+            "project_id": args["project_id"],
+            "message": args["message"],
+        },
+    )
+
+
+async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
+    import base64
+
+    file_data = base64.b64decode(args["data_base64"])
+
+    query = """
+    mutation UploadDocument($project_id: ID!, $file: Upload!, $category: String) {
+      upload_document(project_id: $project_id, file: $file, category: $category) {
+        id
+        filename
+        created_at
+      }
+    }
+    """
+    variables: dict[str, Any] = {
         "project_id": args["project_id"],
-        "message": args["message"],
-    })
+        "category": args.get("category"),
+    }
+
+    return await graphql_upload(
+        query=query,
+        variables=variables,
+        file_var_name="file",
+        filename=args["filename"],
+        content_type=args["content_type"],
+        file_data=file_data,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Einstiegspunkt
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     import asyncio
     import os
+
     if os.getenv("MCP_TRANSPORT", "stdio") == "sse":
         _run_sse()
     else:
@@ -407,7 +495,10 @@ def _run_sse() -> None:
             return True
 
         auth = request.headers.get("Authorization", "")
-        logging.debug("Authorization-Header: %s", auth[:30] + "…" if len(auth) > 30 else auth or "(leer)")
+        logging.debug(
+            "Authorization-Header: %s",
+            auth[:30] + "…" if len(auth) > 30 else auth or "(leer)",
+        )
 
         # 1. Statischer Bearer Token (Claude Desktop)
         if auth == f"Bearer {mcp_api_key}":
@@ -415,9 +506,16 @@ def _run_sse() -> None:
             return True
 
         # 2. JWT via Authelia OIDC Token Introspection (Claude.ai)
-        if auth.startswith("Bearer ") and oidc_introspection_url and oidc_client_id and oidc_client_secret:
+        if (
+            auth.startswith("Bearer ")
+            and oidc_introspection_url
+            and oidc_client_id
+            and oidc_client_secret
+        ):
             jwt_token = auth[7:]
-            logging.info("JWT erhalten, starte Introspection gegen %s", oidc_introspection_url)
+            logging.info(
+                "JWT erhalten, starte Introspection gegen %s", oidc_introspection_url
+            )
             try:
                 async with _httpx.AsyncClient() as http:
                     resp = await http.post(
@@ -428,13 +526,17 @@ def _run_sse() -> None:
                     )
                     data = resp.json()
                     active = data.get("active", False)
-                    logging.info("Introspection: HTTP %s, active=%s", resp.status_code, active)
+                    logging.info(
+                        "Introspection: HTTP %s, active=%s", resp.status_code, active
+                    )
                     logging.debug("Introspection Response: %s", data)
                     return active
             except Exception as e:
                 logging.error("Introspection fehlgeschlagen: %s", e)
         elif auth.startswith("Bearer "):
-            logging.warning("JWT empfangen aber OIDC nicht konfiguriert (OIDC_INTROSPECTION_URL fehlt?)")
+            logging.warning(
+                "JWT empfangen aber OIDC nicht konfiguriert (OIDC_INTROSPECTION_URL fehlt?)"
+            )
 
         logging.warning("Auth ABGELEHNT für %s %s", request.method, request.url.path)
         return False
@@ -450,7 +552,9 @@ def _run_sse() -> None:
         async with sse.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
-            await server.run(streams[0], streams[1], server.create_initialization_options())
+            await server.run(
+                streams[0], streams[1], server.create_initialization_options()
+            )
 
     app = Starlette(
         routes=[
