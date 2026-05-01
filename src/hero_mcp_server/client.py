@@ -11,6 +11,7 @@ load_dotenv()
 
 LEAD_API_URL = "https://login.hero-software.de/api/v1/Projects/create"
 GRAPHQL_URL = "https://login.hero-software.de/api/external/v7/graphql"
+FILE_UPLOAD_URL = "https://login.hero-software.de/api/external/v1/file-uploads"
 
 
 def _headers() -> dict[str, str]:
@@ -48,40 +49,25 @@ async def graphql_query(
         return data.get("data", {})
 
 
-async def graphql_upload(
-    query: str,
-    variables: dict[str, Any],
-    file_var_name: str,
+async def file_upload_rest(
     filename: str,
     content_type: str,
     file_data: bytes,
 ) -> dict[str, Any]:
-    """GraphQL multipart file upload (graphql-multipart-request-spec).
+    """Step 1 of HERO file upload: POST file as multipart/form-data to REST endpoint.
 
-    Builds the three-part multipart body required by servers that implement
-    https://github.com/jaydenseric/graphql-multipart-request-spec:
-      - operations: JSON {query, variables}  (file variable set to null)
-      - map:        JSON {"0": ["variables.<file_var_name>"]}
-      - 0:          actual file binary
+    Returns dict with at least `uuid` (and usually `id`) of the uploaded file.
+    The uuid is then used in the GraphQL upload_document mutation.
     """
-    # The file variable must be null in the operations JSON
-    variables = {**variables, file_var_name: None}
-    operations = json.dumps({"query": query, "variables": variables})
-    map_ = json.dumps({"0": [f"variables.{file_var_name}"]})
-
     headers = _headers()
     # Remove Content-Type so httpx sets the correct multipart/form-data boundary
     headers.pop("Content-Type", None)
 
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            GRAPHQL_URL,
-            data={"operations": operations, "map": map_},
-            files={"0": (filename, file_data, content_type)},
+            FILE_UPLOAD_URL,
+            files={"file": (filename, file_data, content_type)},
             headers=headers,
         )
         resp.raise_for_status()
-        resp_data = resp.json()
-        if "errors" in resp_data:
-            raise RuntimeError(f"GraphQL Fehler: {resp_data['errors']}")
-        return resp_data.get("data", {})
+        return resp.json()

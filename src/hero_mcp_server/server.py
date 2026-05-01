@@ -16,7 +16,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-from .client import graphql_query, graphql_upload  # noqa: E402
+from .client import file_upload_rest, graphql_query  # noqa: E402
 
 server = Server("hero-mcp-server")
 
@@ -425,31 +425,47 @@ async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
+    """Two-step upload to HERO:
+
+    1. POST file as multipart/form-data to /api/external/v1/file-uploads
+       → returns {uuid, id}
+    2. GraphQL mutation upload_document with file_upload_uuid + project_match_id
+    """
     import base64
 
     file_data = base64.b64decode(args["data_base64"])
 
-    query = """
-    mutation UploadDocument($project_id: ID!, $file: Upload!, $category: String) {
-      upload_document(project_id: $project_id, file: $file, category: $category) {
-        id
-        filename
-        created_at
-      }
-    }
-    """
-    variables: dict[str, Any] = {
-        "project_id": args["project_id"],
-        "category": args.get("category"),
-    }
-
-    return await graphql_upload(
-        query=query,
-        variables=variables,
-        file_var_name="file",
+    # Step 1: REST file upload
+    upload_resp = await file_upload_rest(
         filename=args["filename"],
         content_type=args["content_type"],
         file_data=file_data,
+    )
+    uuid = upload_resp.get("uuid")
+    if not uuid:
+        raise RuntimeError(
+            f"file-uploads response missing 'uuid' field: {upload_resp}"
+        )
+
+    # Step 2: attach uploaded file to project via GraphQL
+    project_id = int(args["project_id"])
+    mutation = """
+    mutation UploadDocument($uuid: String!, $projectId: Int!) {
+      upload_document(
+        document: { project_match_id: $projectId, type: "file_upload" }
+        file_upload_uuid: $uuid
+        target: project_match
+        target_id: $projectId
+      ) {
+        id
+        nr
+        type
+      }
+    }
+    """
+    return await graphql_query(
+        mutation,
+        {"uuid": uuid, "projectId": project_id},
     )
 
 
