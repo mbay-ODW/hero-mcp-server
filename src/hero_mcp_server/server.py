@@ -18,7 +18,20 @@ logging.basicConfig(
 
 from .client import file_upload_rest, graphql_query  # noqa: E402
 
-server = Server("hero-mcp-server")
+server = Server(
+    "hero-mcp-server",
+    instructions=(
+        "MCP-Server für die HERO Handwerkersoftware (login.hero-software.de).\n\n"
+        "Wichtige Hinweise zur Tool-Auswahl:\n"
+        "- Datei-Uploads an Projekte: IMMER `hero_upload_document` verwenden – das ist ein "
+        "einziger Aufruf, der intern den zweistufigen REST+GraphQL-Flow abwickelt. "
+        "NICHT `hero_graphql` benutzen um den Upload manuell nachzubauen.\n"
+        "- Projekte anlegen: `hero_create_project` (ruft die create_project_match-Mutation auf, "
+        "benötigt customer_id + measure_id).\n"
+        "- Kontakte anlegen: `hero_create_contact`.\n"
+        "- Beliebige Queries/Mutations für Spezialfälle: `hero_graphql` als Fallback."
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,15 +163,23 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="hero_upload_document",
             description=(
-                "Lädt eine Datei als Dokument in die Dokumentenablage eines HERO-Projekts hoch. "
-                "Die Datei wird als base64-kodierter String übergeben."
+                "Lädt eine Datei in die Dokumentenablage eines HERO-Projekts hoch. "
+                "Dies ist EIN einziger Tool-Aufruf – nicht hero_graphql separat verwenden! "
+                "Der Server erledigt intern automatisch beide HERO-API-Schritte: "
+                "(1) REST-Upload an /api/external/v1/file-uploads, "
+                "(2) GraphQL-Mutation upload_document mit der zurückgelieferten UUID. "
+                "Verwende dieses Tool für JEDE Datei (PDF, Bild, etc.) die einem Projekt "
+                "(project_match) angehängt werden soll. Andere Tools sind nicht nötig."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_id": {
                         "type": "string",
-                        "description": "ID des HERO-Projekts",
+                        "description": (
+                            "ID des HERO-Projekts (project_match.id, z.B. '10295003'). "
+                            "Bekommt man via hero_get_projects."
+                        ),
                     },
                     "filename": {
                         "type": "string",
@@ -170,11 +191,11 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "data_base64": {
                         "type": "string",
-                        "description": "Dateiinhalt als base64-kodierter String",
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "Dokumentkategorie (optional)",
+                        "description": (
+                            "Vollständiger Dateiinhalt als base64-kodierter String. "
+                            "Bei Datei-Anhängen aus einem Chat-Kontext: den base64-Inhalt "
+                            "der Originaldatei direkt durchreichen."
+                        ),
                     },
                 },
                 "required": ["project_id", "filename", "content_type", "data_base64"],
