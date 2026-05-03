@@ -525,11 +525,16 @@ def _run_sse() -> None:
     # 1. Bearer {MCP_API_KEY}  → Claude Desktop / direkte API-Clients
     # 2. Bearer {JWT}          → Claude.ai via Authelia OIDC (Token Introspection)
 
-    async def _is_authorized(request: Request) -> bool:
+    # Auth result: (ok, reason). `reason` is one of:
+    #   None           – ok, no error
+    #   "no_header"    – initial auth needed (no Bearer presented)
+    #   "invalid_token" – token present but invalid/expired/wrong scheme;
+    #                    triggers the OAuth refresh-token flow on the client
+    async def _is_authorized(request: Request) -> tuple[bool, str | None]:
         logging.debug("Auth-Check: %s %s", request.method, request.url.path)
         if not mcp_api_key:
             logging.debug("Kein MCP_API_KEY konfiguriert – Auth übersprungen")
-            return True
+            return True, None
 
         auth = request.headers.get("Authorization", "")
         logging.debug(
@@ -537,18 +542,21 @@ def _run_sse() -> None:
             auth[:30] + "…" if len(auth) > 30 else auth or "(leer)",
         )
 
+        if not auth:
+            logging.warning("Auth ABGELEHNT (no_header) für %s %s", request.method, request.url.path)
+            return False, "no_header"
+
         # 1. Statischer Bearer Token (Claude Desktop)
         if auth == f"Bearer {mcp_api_key}":
             logging.info("Auth OK: statischer Bearer Token")
-            return True
+            return True, None
+
+        if not auth.startswith("Bearer "):
+            logging.warning("Auth ABGELEHNT (wrong scheme) für %s %s", request.method, request.url.path)
+            return False, "invalid_token"
 
         # 2. JWT via Authelia OIDC Token Introspection (Claude.ai)
-        if (
-            auth.startswith("Bearer ")
-            and oidc_introspection_url
-            and oidc_client_id
-            and oidc_client_secret
-        ):
+        if oidc_introspection_url and oidc_client_id and oidc_client_secret:
             jwt_token = auth[7:]
             logging.info(
                 "JWT erhalten, starte Introspection gegen %s", oidc_introspection_url
@@ -567,24 +575,45 @@ def _run_sse() -> None:
                         "Introspection: HTTP %s, active=%s", resp.status_code, active
                     )
                     logging.debug("Introspection Response: %s", data)
-                    return active
+                    if active:
+                        return True, None
+                    return False, "invalid_token"
             except Exception as e:
                 logging.error("Introspection fehlgeschlagen: %s", e)
-        elif auth.startswith("Bearer "):
+                return False, "invalid_token"
+        else:
             logging.warning(
                 "JWT empfangen aber OIDC nicht konfiguriert (OIDC_INTROSPECTION_URL fehlt?)"
             )
+            return False, "invalid_token"
 
-        logging.warning("Auth ABGELEHNT für %s %s", request.method, request.url.path)
-        return False
+    def _unauthorized(reason: str | None) -> Response:
+        """Build a proper 401 with the right WWW-Authenticate hint.
+
+        RFC 6750 §3: a `Bearer error="invalid_token"` challenge tells the
+        OAuth client that its current token is no longer valid and that it
+        should run the refresh-token flow before re-prompting the user.
+        Without this header, Claude.ai cannot distinguish "token expired"
+        from "no auth at all" and falls back to a full reconnect.
+        """
+        realm = "hero-mcp"
+        if reason == "invalid_token":
+            www = (
+                f'Bearer realm="{realm}", error="invalid_token", '
+                f'error_description="The access token expired or is invalid"'
+            )
+        else:
+            www = f'Bearer realm="{realm}"'
+        return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": www})
 
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
         logging.debug("SSE-Verbindung eingehend von %s", request.client)
-        if not await _is_authorized(request):
-            logging.warning("SSE abgewiesen – nicht autorisiert")
-            return Response("Unauthorized", status_code=401)
+        ok, reason = await _is_authorized(request)
+        if not ok:
+            logging.warning("SSE abgewiesen – nicht autorisiert (%s)", reason)
+            return _unauthorized(reason)
         logging.info("SSE-Verbindung akzeptiert")
         async with sse.connect_sse(
             request.scope, request.receive, request._send
@@ -605,12 +634,14 @@ def _run_sse() -> None:
     from mcp.server.streamable_http import StreamableHTTPServerTransport
 
     async def handle_streamable_http(request: Request):
-        if not await _is_authorized(request):
+        ok, reason = await _is_authorized(request)
+        if not ok:
             logging.warning(
-                "Streamable-HTTP abgewiesen – nicht autorisiert (%s)",
+                "Streamable-HTTP abgewiesen – nicht autorisiert (%s) reason=%s",
                 request.url.path,
+                reason,
             )
-            return Response("Unauthorized", status_code=401)
+            return _unauthorized(reason)
         logging.info(
             "Streamable-HTTP request eingehend (%s) von %s",
             request.url.path,
