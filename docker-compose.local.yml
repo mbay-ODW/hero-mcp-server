@@ -1,0 +1,29 @@
+# Local development stack – binds to 127.0.0.1 only, no Traefik, no
+# Authelia, no TLS. Reads upstream credentials from a local .env.
+#
+# Usage:
+#   cp .env.example .env   # set HERO_API_KEY at minimum
+#   docker compose -f docker-compose.local.yml up
+#
+# Connect from Claude Desktop with:
+#   {"mcpServers": {"hero-local": {"url": "http://localhost:8001/sse"}}}
+# or from MCP Inspector pointing at http://localhost:8001/sse.
+#
+# Auth is intentionally disabled – do NOT expose this port to the network.
+services:
+  hero-mcp:
+    image: ghcr.io/mbay-odw/hero-mcp-server:latest
+    container_name: hero-mcp-local
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      - MCP_TRANSPORT=sse
+      - PORT=8000
+      - HERO_API_KEY=${HERO_API_KEY}
+      # Auth deliberately not set → server passes every request through.
+      # MCP_API_KEY=
+      # OIDC_INTROSPECTION_URL=
+      # OIDC_CLIENT_ID=
+      # OIDC_CLIENT_SECRET=
+    ports:
+      - "127.0.0.1:8001:8000"
