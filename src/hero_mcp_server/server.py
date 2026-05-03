@@ -588,23 +588,36 @@ def _run_sse() -> None:
             return False, "invalid_token"
 
     def _unauthorized(reason: str | None) -> Response:
-        """Build a proper 401 with the right WWW-Authenticate hint.
+        """Build a proper 401.
 
         RFC 6750 §3: a `Bearer error="invalid_token"` challenge tells the
-        OAuth client that its current token is no longer valid and that it
-        should run the refresh-token flow before re-prompting the user.
-        Without this header, Claude.ai cannot distinguish "token expired"
-        from "no auth at all" and falls back to a full reconnect.
+        OAuth client that its current token is no longer valid and that
+        it should run the refresh-token flow before re-prompting the
+        user. Without this header, Claude.ai cannot distinguish "token
+        expired" from "no auth at all" and falls back to a full
+        reconnect.
+
+        However: when no Authorization header was sent at all, we
+        deliberately omit WWW-Authenticate. Claude.ai's default OAuth
+        discovery flow (which fetches /.well-known/oauth-authorization-
+        server etc.) only kicks in when the 401 is a "naked" challenge
+        without a Bearer realm hint. Sending `WWW-Authenticate: Bearer
+        realm="…"` here makes the client treat the resource as plain
+        Basic-Bearer and the discovery flow never runs.
         """
-        realm = "hero-mcp"
         if reason == "invalid_token":
             www = (
-                f'Bearer realm="{realm}", error="invalid_token", '
-                f'error_description="The access token expired or is invalid"'
+                'Bearer realm="hero-mcp", error="invalid_token", '
+                'error_description="The access token expired or is invalid"'
             )
-        else:
-            www = f'Bearer realm="{realm}"'
-        return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": www})
+            return Response(
+                "Unauthorized",
+                status_code=401,
+                headers={"WWW-Authenticate": www},
+            )
+        # no_header (or unknown) → no WWW-Authenticate, let the client
+        # fall back to OAuth discovery as before.
+        return Response("Unauthorized", status_code=401)
 
     sse = SseServerTransport("/messages/")
 
