@@ -464,9 +464,7 @@ async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
     )
     uuid = upload_resp.get("uuid")
     if not uuid:
-        raise RuntimeError(
-            f"file-uploads response missing 'uuid' field: {upload_resp}"
-        )
+        raise RuntimeError(f"file-uploads response missing 'uuid' field: {upload_resp}")
 
     # Step 2: attach uploaded file to project via GraphQL
     project_id = int(args["project_id"])
@@ -543,7 +541,9 @@ def _run_sse() -> None:
         )
 
         if not auth:
-            logging.warning("Auth ABGELEHNT (no_header) für %s %s", request.method, request.url.path)
+            logging.warning(
+                "Auth ABGELEHNT (no_header) für %s %s", request.method, request.url.path
+            )
             return False, "no_header"
 
         # 1. Statischer Bearer Token (Claude Desktop)
@@ -552,7 +552,11 @@ def _run_sse() -> None:
             return True, None
 
         if not auth.startswith("Bearer "):
-            logging.warning("Auth ABGELEHNT (wrong scheme) für %s %s", request.method, request.url.path)
+            logging.warning(
+                "Auth ABGELEHNT (wrong scheme) für %s %s",
+                request.method,
+                request.url.path,
+            )
             return False, "invalid_token"
 
         # 2. JWT via Authelia OIDC Token Introspection (Claude.ai)
@@ -639,17 +643,25 @@ def _run_sse() -> None:
         return Response()
 
     # Streamable-HTTP transport (current MCP spec). Modern Claude.ai sends
-    # POST requests to the connector URL with real JSON-RPC payloads from
-    # the very first connect, regardless of whether the URL ends in /sse
-    # or /mcp. We MUST speak Streamable-HTTP there or the connector cannot
-    # initialise after a fresh OAuth login (e.g. after an Authelia restart).
-    import anyio
-    from mcp.server.streamable_http import StreamableHTTPServerTransport
+    # JSON-RPC over POST /sse (or POST /mcp) and expects STATEFUL session
+    # handling – i.e. one `initialize` then many `tools/call` requests
+    # sharing the same Mcp-Session-Id. A per-request stateless transport
+    # rejects the second call with "Received request before
+    # initialization was complete", which is what previously broke every
+    # connector after the very first round-trip.
+    #
+    # StreamableHTTPSessionManager owns the long-lived task group and
+    # session map. It must be entered exactly once per app via
+    # `async with manager.run():` in a Starlette lifespan context.
+    import contextlib
+    from collections.abc import AsyncIterator
+
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     class _AlreadySent(Response):
         """No-op response. Used when the underlying handler has already
         streamed a complete HTTP response via the raw ASGI `send` callable
-        (e.g. StreamableHTTPServerTransport.handle_request). Returning a
+        (e.g. StreamableHTTPSessionManager.handle_request). Returning a
         normal Response from a Starlette endpoint would make Starlette
         try to send a *second* response and raise:
             RuntimeError: Unexpected ASGI message 'http.response.start'
@@ -662,6 +674,11 @@ def _run_sse() -> None:
         async def __call__(self, scope, receive, send):  # noqa: D401
             return  # response was already written by the inner handler
 
+    session_manager = StreamableHTTPSessionManager(
+        app=server,
+        json_response=True,
+    )
+
     async def handle_streamable_http(request: Request):
         ok, reason = await _is_authorized(request)
         if not ok:
@@ -671,40 +688,22 @@ def _run_sse() -> None:
                 reason,
             )
             return _unauthorized(reason)
-        logging.info(
+        logging.debug(
             "Streamable-HTTP request eingehend (%s) von %s",
             request.url.path,
             request.client,
         )
-        # Stateless: one transport per request, no session retention.
-        transport = StreamableHTTPServerTransport(
-            mcp_session_id=None, is_json_response_enabled=True
+        await session_manager.handle_request(
+            request.scope, request.receive, request._send
         )
-        try:
-            async with transport.connect() as streams:
-                async with anyio.create_task_group() as tg:
-
-                    async def _run_server():
-                        try:
-                            await server.run(
-                                streams[0],
-                                streams[1],
-                                server.create_initialization_options(),
-                            )
-                        except Exception:
-                            logging.exception("server.run crashed")
-
-                    tg.start_soon(_run_server)
-                    await transport.handle_request(
-                        request.scope, request.receive, request._send
-                    )
-                    tg.cancel_scope.cancel()
-        except Exception:
-            logging.exception("Streamable-HTTP handler error")
-            raise
-        # Response already written via request._send – returning a normal
-        # Response would crash with "response already completed".
         return _AlreadySent()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        async with session_manager.run():
+            logging.info("StreamableHTTPSessionManager started")
+            yield
+            logging.info("StreamableHTTPSessionManager stopping")
 
     app = Starlette(
         routes=[
@@ -715,6 +714,7 @@ def _run_sse() -> None:
             Route("/sse", endpoint=handle_sse, methods=["GET"]),
             Mount("/messages/", app=sse.handle_post_message),
         ],
+        lifespan=lifespan,
     )
 
     port = int(os.getenv("PORT", "8000"))
