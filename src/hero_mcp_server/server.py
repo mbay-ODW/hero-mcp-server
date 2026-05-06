@@ -166,7 +166,7 @@ async def list_tools() -> list[types.Tool]:
                 "Lädt eine Datei in die Dokumentenablage eines HERO-Projekts hoch. "
                 "Dies ist EIN einziger Tool-Aufruf – nicht hero_graphql separat verwenden! "
                 "Der Server erledigt intern automatisch beide HERO-API-Schritte: "
-                "(1) REST-Upload an /api/external/v1/file-uploads, "
+                "(1) REST-Upload an /app/v8/FileUploads/upload (x-auth-token Header), "
                 "(2) GraphQL-Mutation upload_document mit der zurückgelieferten UUID. "
                 "Verwende dieses Tool für JEDE Datei (PDF, Bild, etc.) die einem Projekt "
                 "(project_match) angehängt werden soll. Andere Tools sind nicht nötig."

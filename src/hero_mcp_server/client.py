@@ -11,7 +11,12 @@ load_dotenv()
 
 LEAD_API_URL = "https://login.hero-software.de/api/v1/Projects/create"
 GRAPHQL_URL = "https://login.hero-software.de/api/external/v7/graphql"
-FILE_UPLOAD_URL = "https://login.hero-software.de/api/external/v1/file-uploads"
+# Confirmed by HERO support 2026-05-06: file uploads do not go through
+# /api/external/* (that endpoint doesn't exist). They go through the
+# internal /app/v8/FileUploads/upload route, with `x-auth-token` instead
+# of the GraphQL Bearer header. See:
+#   https://support.hero-software.de/hc/s/article/7474773464732-GraphQL-Dateiupload
+FILE_UPLOAD_URL = "https://login.hero-software.de/app/v8/FileUploads/upload"
 
 
 def _headers() -> dict[str, str]:
@@ -54,14 +59,24 @@ async def file_upload_rest(
     content_type: str,
     file_data: bytes,
 ) -> dict[str, Any]:
-    """Step 1 of HERO file upload: POST file as multipart/form-data to REST endpoint.
+    """Step 1 of HERO file upload: POST file as multipart/form-data to the
+    internal /app/v8/FileUploads/upload endpoint.
 
-    Returns dict with at least `uuid` (and usually `id`) of the uploaded file.
-    The uuid is then used in the GraphQL upload_document mutation.
+    Returns dict with at least `uuid` of the uploaded file. The uuid is
+    then used in the GraphQL upload_document / upload_image mutation.
+
+    Note the auth header: this endpoint expects `x-auth-token` (NOT the
+    `Authorization: Bearer` header used by the GraphQL endpoint). The
+    same HERO_API_KEY value is used for both, only the header name
+    differs. Confirmed by HERO support 2026-05-06.
     """
-    headers = _headers()
-    # Remove Content-Type so httpx sets the correct multipart/form-data boundary
-    headers.pop("Content-Type", None)
+    api_key = os.getenv("HERO_API_KEY")
+    if not api_key:
+        raise ValueError("HERO_API_KEY ist nicht gesetzt. Bitte .env konfigurieren.")
+    headers = {
+        "x-auth-token": api_key,
+        "Accept": "application/json",
+    }
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
