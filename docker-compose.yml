@@ -11,7 +11,7 @@ services:
       - HERO_API_KEY=${HERO_API_KEY}
       # Auth
       - MCP_API_KEY=${MCP_API_KEY}
-      - OIDC_INTROSPECTION_URL=https://hero-mcp.${DOMAIN}/api/oidc/introspection
+      - OIDC_INTROSPECTION_URL=${OIDC_INTROSPECTION_URL:-https://authelia.${DOMAIN}/api/oidc/introspection}
       - OIDC_CLIENT_ID=hero-mcp
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
     expose:
