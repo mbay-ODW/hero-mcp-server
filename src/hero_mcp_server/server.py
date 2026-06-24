@@ -46,19 +46,21 @@ async def list_tools() -> list[types.Tool]:
             name="hero_create_project",
             description=(
                 "Legt ein neues Projekt in HERO an via create_project_match-Mutation. "
-                "Benötigt customer_id und measure_id (IDs aus hero_get_contacts bzw. der API). "
-                "Tipp: customer_id aus hero_get_contacts beziehen, measure_id über hero_graphql abfragen."
+                "Benötigt nur customer_id (Kontakt-ID aus hero_get_contacts) und measure_id "
+                "(Gewerk, via `company { measures { id name } }`). Alle weiteren Pflicht-IDs "
+                "(contact_id, company_id, partner_id, address_id) zieht der Server automatisch "
+                "aus dem Kontakt bzw. dem Account. type_id ist optional (Default 1 = 'Projekt')."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "customer_id": {
                         "type": "string",
-                        "description": "ID des Kunden/Kontakts (nicht contact_id!)",
+                        "description": "ID des Kunden/Kontakts (aus hero_get_contacts)",
                     },
                     "measure_id": {
                         "type": "string",
-                        "description": "ID des Gewerks (z.B. via hero_graphql: { measures { id name } })",
+                        "description": "ID des Gewerks (via hero_graphql: `company { measures { id name } }`)",
                     },
                     "name": {
                         "type": "string",
@@ -66,11 +68,23 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "type_id": {
                         "type": "string",
-                        "description": "Projekttyp-ID (optional)",
+                        "description": "Projekttyp-ID (optional, Default 1)",
+                    },
+                    "contact_id": {
+                        "type": "string",
+                        "description": "Abweichende Kontakt-ID (optional, Default = customer_id)",
+                    },
+                    "company_id": {
+                        "type": "string",
+                        "description": "Firmen-ID (optional, Default automatisch aus Account/Kontakt)",
+                    },
+                    "partner_id": {
+                        "type": "string",
+                        "description": "Partner-ID (optional, Default automatisch aus dem Account)",
                     },
                     "address_id": {
                         "type": "string",
-                        "description": "Adress-ID für das Projekt (optional)",
+                        "description": "Adress-ID (optional, Default automatisch aus dem Kontakt)",
                     },
                 },
                 "required": ["customer_id", "measure_id"],
@@ -131,10 +145,20 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="hero_create_contact",
-            description="Erstellt einen neuen Kontakt in HERO.",
+            description=(
+                "Erstellt einen neuen Kontakt in HERO (create_contact-Mutation, CustomerInput). "
+                "type unterscheidet Privat- und Firmenkontakt; bei vorhandener E-Mail wird per "
+                "findExisting standardmäßig ein bestehender Kontakt wiederverwendet statt dupliziert."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["private", "commercial"],
+                        "default": "private",
+                        "description": "Kontakttyp: 'private' (Privatperson) oder 'commercial' (Firma)",
+                    },
                     "email": {"type": "string"},
                     "first_name": {"type": "string"},
                     "last_name": {"type": "string"},
@@ -144,8 +168,13 @@ async def list_tools() -> list[types.Tool]:
                     "street": {"type": "string"},
                     "city": {"type": "string"},
                     "zipcode": {"type": "string"},
+                    "find_existing": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Bestehenden Kontakt wiederverwenden statt Duplikat anlegen",
+                    },
                 },
-                "required": ["email"],
+                "required": [],
             },
         ),
         types.Tool(
@@ -270,14 +299,73 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _to_int(value: Any) -> int:
+    """HERO erwartet Int-IDs; MCP-Clients liefern sie oft als String."""
+    return int(str(value).strip())
+
+
 async def _create_project(args: dict[str, Any]) -> dict[str, Any]:
+    """Legt ein Projekt via create_project_match an.
+
+    create_project_match wirft eine InvalidPrimaryKeyException, wenn nicht der
+    vollständige Primärschlüssel gesetzt ist. customer_id + measure_id allein
+    reichen nicht – zusätzlich braucht es contact_id, company_id, partner_id,
+    address_id und type_id. Diese werden hier automatisch ermittelt:
+      - address_id / company_id  → aus dem Kontakt (customer_id)
+      - partner_id / company_id  → aus dem Account (user.partner / company)
+      - contact_id               → = customer_id (sofern nicht überschrieben)
+      - type_id                  → Default 1 ('Projekt')
+    Explizit übergebene IDs haben immer Vorrang.
+    """
+    customer_id = _to_int(args["customer_id"])
+
+    # Kontakt- und Account-Stammdaten parallel beziehen.
+    lookup = await graphql_query(
+        """
+        query ProjectDefaults($ids: [Int]) {
+          contacts(ids: $ids) { id company_id address_id }
+          user { partner { id } }
+          company { id }
+        }
+        """,
+        {"ids": [customer_id]},
+    )
+    contacts = lookup.get("contacts") or []
+    contact = contacts[0] if contacts else {}
+    account_company = (lookup.get("company") or {}).get("id")
+    account_partner = ((lookup.get("user") or {}).get("partner") or {}).get("id")
+
+    address_id = args.get("address_id") or contact.get("address_id")
+    company_id = args.get("company_id") or contact.get("company_id") or account_company
+    partner_id = args.get("partner_id") or account_partner
+
+    missing = [
+        label
+        for label, val in (
+            ("address_id", address_id),
+            ("company_id", company_id),
+            ("partner_id", partner_id),
+        )
+        if val is None
+    ]
+    if missing:
+        raise RuntimeError(
+            "Pflicht-IDs für create_project_match konnten nicht ermittelt werden: "
+            f"{', '.join(missing)}. Prüfe, ob customer_id={customer_id} ein gültiger "
+            "Kontakt ist, oder übergib die IDs explizit."
+        )
+
     project_match_input: dict[str, Any] = {
-        "customer_id": args["customer_id"],
-        "measure_id": args["measure_id"],
+        "customer_id": customer_id,
+        "contact_id": _to_int(args.get("contact_id") or customer_id),
+        "company_id": _to_int(company_id),
+        "partner_id": _to_int(partner_id),
+        "address_id": _to_int(address_id),
+        "type_id": _to_int(args.get("type_id") or 1),
+        "measure_id": _to_int(args["measure_id"]),
     }
-    for field in ("name", "type_id", "address_id"):
-        if args.get(field):
-            project_match_input[field] = args[field]
+    if args.get("name"):
+        project_match_input["name"] = args["name"]
 
     query = """
     mutation CreateProjectMatch($project_match: ProjectMatchInput!) {
@@ -395,8 +483,13 @@ async def _get_calendar_events(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _create_contact(args: dict[str, Any]) -> dict[str, Any]:
-    contact_input: dict[str, Any] = {"email": args["email"]}
+    # create_contact erwartet ein CustomerInput (NICHT ContactInput). `type`
+    # ist serverseitig Pflicht ('private' | 'commercial'). Die Adresse wird als
+    # verschachteltes AddressInput übergeben – CustomerInput hat kein flaches
+    # street/zipcode/city.
+    contact_input: dict[str, Any] = {"type": args.get("type") or "private"}
     for field in (
+        "email",
         "first_name",
         "last_name",
         "company_name",
@@ -413,34 +506,46 @@ async def _create_contact(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     query = """
-    mutation CreateContact($contact: ContactInput!) {
-      create_contact(contact: $contact) {
+    mutation CreateContact($contact: CustomerInput, $findExisting: Boolean) {
+      create_contact(contact: $contact, findExisting: $findExisting) {
         id
-        nr
-        email
         first_name
         last_name
-      }
-    }
-    """
-    return await graphql_query(query, {"contact": contact_input})
-
-
-async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
-    query = """
-    mutation AddLogbookEntry($project_id: ID!, $message: String!) {
-      add_logbook_entry(project_id: $project_id, message: $message) {
-        id
-        created_at
-        message
+        company_name
+        email
+        company_id
+        address_id
       }
     }
     """
     return await graphql_query(
         query,
         {
-            "project_id": args["project_id"],
-            "message": args["message"],
+            "contact": contact_input,
+            "findExisting": args.get("find_existing", True),
+        },
+    )
+
+
+async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
+    # add_logbook_entry nimmt ein LogbookEntryInput (target + target_id +
+    # custom_text), KEINE losen project_id/message-Argumente. Der Rückgabetyp
+    # History hat weder created_at noch message – nur { id } ist sicher.
+    query = """
+    mutation AddLogbookEntry($logbook_entry: LogbookEntryInput) {
+      add_logbook_entry(logbook_entry: $logbook_entry) {
+        id
+      }
+    }
+    """
+    return await graphql_query(
+        query,
+        {
+            "logbook_entry": {
+                "target": "project_match",
+                "target_id": _to_int(args["project_id"]),
+                "custom_text": args["message"],
+            },
         },
     )
 
