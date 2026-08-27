@@ -605,53 +605,52 @@ async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _get_logbook(args: dict[str, Any]) -> dict[str, Any]:
-    # Logbuch = project_histories des Projekts; Eintragstext steht in `custom_text`.
-    # Sortier-Mechanismus der HERO-API (verifiziert): orderBy nimmt einen BLANKEN
-    # Feldnamen ("created") und sortiert aufsteigend. Es gibt keine Richtungs-
-    # syntax ("created DESC"/"-created" → 422). "Neueste zuerst" erreicht man,
-    # indem man `last:N` statt `first:N` nimmt (dreht das Fenster ans andere Ende).
+    # Logbuch = `project_match.histories` (das komplette Projekt-Logbuch inkl.
+    # Kommentaren). WICHTIG: NICHT die Root-Query `project_histories` verwenden –
+    # die filtert Kommentar-Einträge (type_code 9210, "Kommentar von …") still
+    # heraus und liefert nur System-/Status-Zeilen. `project_match.histories`
+    # entspricht dem, was das HERO-UI-Logbuch zeigt, und ist bereits
+    # neueste-zuerst sortiert. Filter/Pagination hier client-seitig, da das Feld
+    # keine Argumente akzeptiert.
     limit = int(args.get("limit", 20))
     offset = int(args.get("offset", 0))
     newest_first = args.get("newest_first", True)
-    over = limit + 1  # +1, um has_more ehrlich zu bestimmen
+    search = (args.get("search_term") or "").strip().lower()
     query = """
-    query GetLogbook($pid: Int, $first: Int, $last: Int, $offset: Int, $search: String) {
-      project_histories(
-        project_match_id: $pid
-        first: $first
-        last: $last
-        offset: $offset
-        orderBy: "created"
-        search_term: $search
-      ) {
-        id
-        created
-        author_name
-        type_code
-        custom_title
-        custom_text
-        is_editable
+    query GetLogbook($pid: Int) {
+      project_match(project_match_id: $pid) {
+        histories {
+          id
+          created
+          author_name
+          type_code
+          custom_title
+          custom_text
+          is_editable
+        }
       }
     }
     """
-    data = await graphql_query(
-        query,
-        {
-            "pid": _to_int(args["project_id"]),
-            "first": None if newest_first else over,
-            "last": over if newest_first else None,
-            "offset": offset,
-            "search": args.get("search_term"),
-        },
-    )
-    items = data.get("project_histories") or []
-    has_more = len(items) > limit
+    data = await graphql_query(query, {"pid": _to_int(args["project_id"])})
+    pm = data.get("project_match") or {}
+    items = pm.get("histories") or []  # bereits neueste-zuerst
+    if not newest_first:
+        items = list(reversed(items))
+    if search:
+        items = [
+            h
+            for h in items
+            if search
+            in f"{h.get('custom_text') or ''} {h.get('custom_title') or ''}".lower()
+        ]
+    total = len(items)
+    window = items[offset : offset + limit]
     return {
-        "project_histories": items[:limit],
-        "count": min(len(items), limit),
+        "project_histories": window,
+        "count": len(window),
         "offset": offset,
         "newest_first": newest_first,
-        "has_more": has_more,
+        "has_more": offset + limit < total,
     }
 
 
@@ -672,7 +671,10 @@ async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
         content_type=args["content_type"],
         file_data=file_data,
     )
-    uuid = upload_resp.get("uuid")
+    # HERO antwortet {"status": "success", "data": {"uuid": ...}} – die uuid
+    # liegt unter data.uuid, NICHT auf Top-Level. Fallback auf Top-Level für
+    # den Fall, dass sich das Format wieder ändert.
+    uuid = (upload_resp.get("data") or {}).get("uuid") or upload_resp.get("uuid")
     if not uuid:
         raise RuntimeError(f"file-uploads response missing 'uuid' field: {upload_resp}")
 
