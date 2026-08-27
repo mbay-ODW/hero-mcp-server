@@ -190,6 +190,35 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="hero_get_logbook",
+            description=(
+                "Liest die Logbuch-/Historieneinträge (project_histories) eines HERO-Projekts. "
+                "Nützlich als Dedup-Check VOR hero_add_logbook_entry (der eigentliche Eintragstext "
+                "steht in `custom_text`). Optionaler `search_term` filtert serverseitig über den Text."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "ID des Projekts (project_match.id)",
+                    },
+                    "search_term": {
+                        "type": "string",
+                        "description": "Optionaler Textfilter über die Einträge",
+                    },
+                    "newest_first": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Neueste Einträge zuerst (Default). false = älteste zuerst.",
+                    },
+                    "limit": {"type": "integer", "default": 20},
+                    "offset": {"type": "integer", "default": 0},
+                },
+                "required": ["project_id"],
+            },
+        ),
+        types.Tool(
             name="hero_upload_document",
             description=(
                 "Lädt eine Datei in die Dokumentenablage eines HERO-Projekts hoch. "
@@ -287,6 +316,8 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         return await _create_contact(args)
     if name == "hero_add_logbook_entry":
         return await _add_logbook_entry(args)
+    if name == "hero_get_logbook":
+        return await _get_logbook(args)
     if name == "hero_upload_document":
         return await _upload_document(args)
     if name == "hero_graphql":
@@ -381,9 +412,13 @@ async def _create_project(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _get_contacts(args: dict[str, Any]) -> dict[str, Any]:
+    # `search` filtert serverseitig über Name/E-Mail/Firma – MUSS in die Query,
+    # sonst wird der Parameter still verschluckt und jede Suche liefert Seite 1.
+    limit = int(args.get("limit", 20))
+    offset = int(args.get("offset", 0))
     query = """
-    query GetContacts($limit: Int, $offset: Int) {
-      contacts(first: $limit, offset: $offset) {
+    query GetContacts($limit: Int, $offset: Int, $search: String) {
+      contacts(first: $limit, offset: $offset, search: $search) {
         id
         nr
         first_name
@@ -400,17 +435,29 @@ async def _get_contacts(args: dict[str, Any]) -> dict[str, Any]:
       }
     }
     """
-    variables = {
-        "limit": args.get("limit", 20),
-        "offset": args.get("offset", 0),
+    # limit+1 anfragen, um has_more ehrlich bestimmen zu können.
+    data = await graphql_query(
+        query,
+        {"limit": limit + 1, "offset": offset, "search": args.get("search")},
+    )
+    items = data.get("contacts") or []
+    has_more = len(items) > limit
+    return {
+        "contacts": items[:limit],
+        "count": min(len(items), limit),
+        "offset": offset,
+        "has_more": has_more,
     }
-    return await graphql_query(query, variables)
 
 
 async def _get_projects(args: dict[str, Any]) -> dict[str, Any]:
+    # `search` filtert serverseitig – ohne Einsetzen in die Query wird jede
+    # Suche still ignoriert und liefert immer dieselbe erste Seite.
+    limit = int(args.get("limit", 20))
+    offset = int(args.get("offset", 0))
     query = """
-    query GetProjects($limit: Int, $offset: Int) {
-      project_matches(first: $limit, offset: $offset) {
+    query GetProjects($limit: Int, $offset: Int, $search: String) {
+      project_matches(first: $limit, offset: $offset, search: $search) {
         id
         name
         project_nr
@@ -431,11 +478,18 @@ async def _get_projects(args: dict[str, Any]) -> dict[str, Any]:
       }
     }
     """
-    variables = {
-        "limit": args.get("limit", 20),
-        "offset": args.get("offset", 0),
+    data = await graphql_query(
+        query,
+        {"limit": limit + 1, "offset": offset, "search": args.get("search")},
+    )
+    items = data.get("project_matches") or []
+    has_more = len(items) > limit
+    return {
+        "project_matches": items[:limit],
+        "count": min(len(items), limit),
+        "offset": offset,
+        "has_more": has_more,
     }
-    return await graphql_query(query, variables)
 
 
 async def _get_documents(args: dict[str, Any]) -> dict[str, Any]:
@@ -548,6 +602,57 @@ async def _add_logbook_entry(args: dict[str, Any]) -> dict[str, Any]:
             },
         },
     )
+
+
+async def _get_logbook(args: dict[str, Any]) -> dict[str, Any]:
+    # Logbuch = project_histories des Projekts; Eintragstext steht in `custom_text`.
+    # Sortier-Mechanismus der HERO-API (verifiziert): orderBy nimmt einen BLANKEN
+    # Feldnamen ("created") und sortiert aufsteigend. Es gibt keine Richtungs-
+    # syntax ("created DESC"/"-created" → 422). "Neueste zuerst" erreicht man,
+    # indem man `last:N` statt `first:N` nimmt (dreht das Fenster ans andere Ende).
+    limit = int(args.get("limit", 20))
+    offset = int(args.get("offset", 0))
+    newest_first = args.get("newest_first", True)
+    over = limit + 1  # +1, um has_more ehrlich zu bestimmen
+    query = """
+    query GetLogbook($pid: Int, $first: Int, $last: Int, $offset: Int, $search: String) {
+      project_histories(
+        project_match_id: $pid
+        first: $first
+        last: $last
+        offset: $offset
+        orderBy: "created"
+        search_term: $search
+      ) {
+        id
+        created
+        author_name
+        type_code
+        custom_title
+        custom_text
+        is_editable
+      }
+    }
+    """
+    data = await graphql_query(
+        query,
+        {
+            "pid": _to_int(args["project_id"]),
+            "first": None if newest_first else over,
+            "last": over if newest_first else None,
+            "offset": offset,
+            "search": args.get("search_term"),
+        },
+    )
+    items = data.get("project_histories") or []
+    has_more = len(items) > limit
+    return {
+        "project_histories": items[:limit],
+        "count": min(len(items), limit),
+        "offset": offset,
+        "newest_first": newest_first,
+        "has_more": has_more,
+    }
 
 
 async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
