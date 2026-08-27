@@ -255,6 +255,13 @@ async def list_tools() -> list[types.Tool]:
                             "der Originaldatei direkt durchreichen."
                         ),
                     },
+                    "document_type_id": {
+                        "type": "string",
+                        "description": (
+                            "Dokumenttyp-ID (optional, Default 551120 = 'Allgemein'). "
+                            "Weitere via hero_graphql: document_types { id name }."
+                        ),
+                    },
                 },
                 "required": ["project_id", "filename", "content_type", "data_base64"],
             },
@@ -678,12 +685,20 @@ async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
     if not uuid:
         raise RuntimeError(f"file-uploads response missing 'uuid' field: {upload_resp}")
 
-    # Step 2: attach uploaded file to project via GraphQL
+    # Step 2: attach uploaded file to project via GraphQL.
+    # upload_document verlangt ein document_type_id (sonst 422
+    # "document_type_id: Dieses Feld ist erforderlich"). Default 551120 =
+    # "Allgemein" (base_type generic); überschreibbar via args.
     project_id = int(args["project_id"])
+    doc_type_id = _to_int(args.get("document_type_id") or 551120)
     mutation = """
-    mutation UploadDocument($uuid: String!, $projectId: Int!) {
+    mutation UploadDocument($uuid: String!, $projectId: Int!, $docTypeId: Int!) {
       upload_document(
-        document: { project_match_id: $projectId, type: "file_upload" }
+        document: {
+          project_match_id: $projectId
+          type: "file_upload"
+          document_type_id: $docTypeId
+        }
         file_upload_uuid: $uuid
         target: project_match
         target_id: $projectId
@@ -696,7 +711,7 @@ async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
     """
     return await graphql_query(
         mutation,
-        {"uuid": uuid, "projectId": project_id},
+        {"uuid": uuid, "projectId": project_id, "docTypeId": doc_type_id},
     )
 
 
