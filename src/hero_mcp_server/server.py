@@ -4,9 +4,10 @@ import json
 import logging
 from typing import Any
 
-import mcp.server.stdio
+import jsonschema
 import mcp.types as types
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
+from mcp.server.stdio import stdio_server
 
 import os
 
@@ -18,28 +19,11 @@ logging.basicConfig(
 
 from .client import file_upload_rest, graphql_query  # noqa: E402
 
-server = Server(
-    "hero-mcp-server",
-    instructions=(
-        "MCP-Server für die HERO Handwerkersoftware (login.hero-software.de).\n\n"
-        "Wichtige Hinweise zur Tool-Auswahl:\n"
-        "- Datei-Uploads an Projekte: IMMER `hero_upload_document` verwenden – das ist ein "
-        "einziger Aufruf, der intern den zweistufigen REST+GraphQL-Flow abwickelt. "
-        "NICHT `hero_graphql` benutzen um den Upload manuell nachzubauen.\n"
-        "- Projekte anlegen: `hero_create_project` (ruft die create_project_match-Mutation auf, "
-        "benötigt customer_id + measure_id).\n"
-        "- Kontakte anlegen: `hero_create_contact`.\n"
-        "- Beliebige Queries/Mutations für Spezialfälle: `hero_graphql` als Fallback."
-    ),
-)
-
-
 # ---------------------------------------------------------------------------
 # Tool-Definitionen
 # ---------------------------------------------------------------------------
 
 
-@server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
         types.Tool(
@@ -51,7 +35,7 @@ async def list_tools() -> list[types.Tool]:
                 "(contact_id, company_id, partner_id, address_id) zieht der Server automatisch "
                 "aus dem Kontakt bzw. dem Account. type_id ist optional (Default 1 = 'Projekt')."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "customer_id": {
@@ -93,7 +77,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="hero_get_contacts",
             description="Listet Kontakte/Kunden aus HERO. Optional: Suchbegriff und Seitenanzahl.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "search": {
@@ -112,7 +96,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="hero_get_projects",
             description="Listet Projekte aus HERO. Optional: Suchbegriff und Seitenanzahl.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "search": {"type": "string"},
@@ -124,7 +108,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="hero_get_documents",
             description="Listet Dokumente (Angebote, Rechnungen, …) aus HERO.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "default": 20},
@@ -135,7 +119,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="hero_get_calendar_events",
             description="Listet Termine aus dem HERO-Kalender.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "default": 20},
@@ -150,7 +134,7 @@ async def list_tools() -> list[types.Tool]:
                 "type unterscheidet Privat- und Firmenkontakt; bei vorhandener E-Mail wird per "
                 "findExisting standardmäßig ein bestehender Kontakt wiederverwendet statt dupliziert."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "type": {
@@ -180,7 +164,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="hero_add_logbook_entry",
             description="Fügt einen Protokoll-Eintrag zu einem HERO-Projekt hinzu.",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "project_id": {"type": "string", "description": "ID des Projekts"},
@@ -196,7 +180,7 @@ async def list_tools() -> list[types.Tool]:
                 "Nützlich als Dedup-Check VOR hero_add_logbook_entry (der eigentliche Eintragstext "
                 "steht in `custom_text`). Optionaler `search_term` filtert serverseitig über den Text."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "project_id": {
@@ -229,7 +213,7 @@ async def list_tools() -> list[types.Tool]:
                 "Verwende dieses Tool für JEDE Datei (PDF, Bild, etc.) die einem Projekt "
                 "(project_match) angehängt werden soll. Andere Tools sind nicht nötig."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "project_id": {
@@ -272,7 +256,7 @@ async def list_tools() -> list[types.Tool]:
                 "Führt eine beliebige GraphQL-Abfrage direkt gegen die HERO API aus. "
                 "Für Experten und individuelle Abfragen."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
@@ -295,7 +279,6 @@ async def list_tools() -> list[types.Tool]:
 # ---------------------------------------------------------------------------
 
 
-@server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     try:
         result = await _dispatch(name, arguments)
@@ -720,6 +703,54 @@ async def _upload_document(args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def _on_list_tools(
+    ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
+    return types.ListToolsResult(tools=await list_tools())
+
+
+def _error_result(text: str) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], is_error=True
+    )
+
+
+async def _on_call_tool(
+    ctx: ServerRequestContext, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    """mcp 2.x prueft Argumente nicht mehr und wandelt Exceptions nicht mehr um."""
+    arguments = params.arguments or {}
+    tool = next((t for t in await list_tools() if t.name == params.name), None)
+    if tool is not None:
+        try:
+            jsonschema.validate(arguments, tool.input_schema)
+        except jsonschema.ValidationError as exc:
+            return _error_result(f"Input validation error: {exc.message}")
+    try:
+        content = await call_tool(params.name, arguments)
+    except Exception as exc:
+        return _error_result(str(exc))
+    return types.CallToolResult(content=content, is_error=False)
+
+
+server = Server(
+    "hero-mcp-server",
+    instructions=(
+        "MCP-Server für die HERO Handwerkersoftware (login.hero-software.de).\n\n"
+        "Wichtige Hinweise zur Tool-Auswahl:\n"
+        "- Datei-Uploads an Projekte: IMMER `hero_upload_document` verwenden – das ist ein "
+        "einziger Aufruf, der intern den zweistufigen REST+GraphQL-Flow abwickelt. "
+        "NICHT `hero_graphql` benutzen um den Upload manuell nachzubauen.\n"
+        "- Projekte anlegen: `hero_create_project` (ruft die create_project_match-Mutation auf, "
+        "benötigt customer_id + measure_id).\n"
+        "- Kontakte anlegen: `hero_create_contact`.\n"
+        "- Beliebige Queries/Mutations für Spezialfälle: `hero_graphql` als Fallback."
+    ),
+    on_list_tools=_on_list_tools,
+    on_call_tool=_on_call_tool,
+)
+
+
 def main() -> None:
     import asyncio
     import os
@@ -727,7 +758,14 @@ def main() -> None:
     if os.getenv("MCP_TRANSPORT", "stdio") == "sse":
         _run_sse()
     else:
-        asyncio.run(mcp.server.stdio.run_server(server))
+        asyncio.run(_run_stdio())
+
+
+async def _run_stdio() -> None:
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream, write_stream, server.create_initialization_options()
+        )
 
 
 def _run_sse() -> None:
@@ -904,6 +942,7 @@ def _run_sse() -> None:
     session_manager = StreamableHTTPSessionManager(
         app=server,
         json_response=True,
+        max_request_body_size=32 * 1024 * 1024,
     )
 
     async def handle_streamable_http(request: Request):
